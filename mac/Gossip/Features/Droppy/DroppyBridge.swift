@@ -5,16 +5,23 @@ import Security
 
 /// Local API for the Droppy droplet: newline-delimited JSON over a `0600` Unix socket in Gossip's Application Support
 /// folder. Only a client signed by Droppy's team may connect, checked by audit token, because the socket carries
-/// notification content and lets the client reply to and dismiss phone notifications.
+/// notification content and messages and lets the client act on the phone.
 ///
-/// Server → client: `state` (devices, online, battery) on connect and on every change; `notification.posted` /
-/// `notification.removed` as they arrive, plus every active one on connect with `replay: true`.
-/// Client → server: `reply` (`deviceId`, `id`, `text`) and `dismiss` (`deviceId`, `id`).
+/// Server → client:
+/// - `state`: devices (online, battery) and the peers this Mac is ringing, on connect and on every change.
+/// - `notification.posted` / `notification.removed` as they arrive, plus every active one on connect with `replay: true`.
+/// - `media`: a device's now-playing state, or `nowPlaying: null` when it stopped. Artwork only when it changed.
+/// - `messages.threads`, `messages.history` (the open conversation) and `messages.status` while the client has Messages open.
+///
+/// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `ring` (`deviceId`), `open` (`target`: pair, mirror,
+/// messages), `media` (`action`), `messages.open` / `messages.close`, `messages.thread` (`threadId`) and `messages.send`
+/// (`phoneId`, `address`, `body`).
 ///
 /// All bookkeeping is on the main queue; each client gets a serial queue for its blocking writes.
 final class DroppyBridge {
     static let allowedTeamID = "NARHG44L48"
     private static let maxCommandBytes = 64 * 1024
+    private static let openTargets: Set<String> = ["pair", "mirror", "messages"]
 
     static var socketPath: String {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -33,9 +40,15 @@ final class DroppyBridge {
         }
     }
 
+    /// Opens a `connect://` URL in this process (pairing, mirroring and Messages windows). Set by `ConnectApp`.
+    var openURLs: (([URL]) -> Void)?
+
     private weak var transport: TransportManager?
     private let battery: BatterySyncManager
     private let notifications: NotificationMirrorManager
+    private let ring: RingManager
+    private let media: MediaControlManager
+    private let messages: MessagesManager
     private let trusted: TrustedDevicesStore
 
     private var listenFD: Int32 = -1
@@ -44,12 +57,25 @@ final class DroppyBridge {
     private var cancellables = Set<AnyCancellable>()
     /// Notifications each phone is still showing, by device id then Android id.
     private var active: [String: [String: NotificationPostedPayload]] = [:]
+    /// What each device last reported as now playing, and the artwork already sent for it.
+    private var nowPlaying: [String: NowPlayingState] = [:]
+    private var sentArtwork: [String: Data] = [:]
+    /// Whether the droplet has Messages open, so `MessagesManager` keeps refreshing on its behalf.
+    private var messagesOpen = false
+
+    /// Read from the transport's queue by `NotificationMirrorManager`, so it is kept apart from `clients`.
+    private let clientCountLock = NSLock()
+    private var clientCount = 0
+    var hasClients: Bool { clientCountLock.withLock { clientCount > 0 } }
 
     init(transport: TransportManager, battery: BatterySyncManager, notifications: NotificationMirrorManager,
-         trusted: TrustedDevicesStore = .shared) {
+         ring: RingManager, media: MediaControlManager, messages: MessagesManager, trusted: TrustedDevicesStore = .shared) {
         self.transport = transport
         self.battery = battery
         self.notifications = notifications
+        self.ring = ring
+        self.media = media
+        self.messages = messages
         self.trusted = trusted
     }
 
@@ -69,14 +95,34 @@ final class DroppyBridge {
         }
 
         // `@Published` fires before the new value is stored, so read it on the next main-queue turn.
-        Publishers.Merge3(
+        Publishers.Merge4(
             transport.$connectedDeviceIds.map { _ in () },
             battery.$batteryBySenderId.map { _ in () },
-            trusted.$devices.map { _ in () }
+            trusted.$devices.map { _ in () },
+            ring.$ringingPeers.map { _ in () }
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in self?.broadcastState() }
         .store(in: &cancellables)
+
+        media.$nowPlayingByDevice
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] latest in self?.mediaChanged(latest) }
+            .store(in: &cancellables)
+
+        Publishers.Merge3(
+            messages.$threads.map { _ in () },
+            messages.$error.map { _ in () },
+            messages.$loading.map { _ in () }
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] in self?.broadcastThreads() }
+        .store(in: &cancellables)
+
+        Publishers.CombineLatest(messages.$messages, messages.$openThreadId)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _ in self?.broadcastHistory() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Socket
@@ -141,6 +187,7 @@ final class DroppyBridge {
         source.setCancelHandler { close(fd) }
         client.readSource = source
         clients[fd] = client
+        clientCountLock.withLock { clientCount = clients.count }
         source.resume()
 
         send(stateMessage(), to: client)
@@ -151,6 +198,9 @@ final class DroppyBridge {
                 message["replay"] = true
                 send(message, to: client)
             }
+        }
+        for (deviceId, state) in nowPlaying {
+            send(mediaMessage(deviceId: deviceId, state, includeArtwork: true), to: client)
         }
     }
 
@@ -186,7 +236,12 @@ final class DroppyBridge {
 
     private func drop(_ client: Client) {
         guard clients.removeValue(forKey: client.fd) != nil else { return }
+        clientCountLock.withLock { clientCount = clients.count }
         client.readSource?.cancel()
+        if clients.isEmpty, messagesOpen {
+            messagesOpen = false
+            messages.close()
+        }
     }
 
     private func send(_ message: [String: Any], to client: Client) {
@@ -214,16 +269,45 @@ final class DroppyBridge {
 
     private func handleCommand(_ data: Data) {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = object["type"] as? String,
-              let deviceId = object["deviceId"] as? String,
-              let id = object["id"] as? String,
-              trusted.devices.contains(where: { $0.deviceId == deviceId }) else { return }
+              let type = object["type"] as? String else { return }
+        let string = { (key: String, limit: Int) -> String? in
+            guard let value = object[key] as? String, !value.isEmpty, value.count <= limit else { return nil }
+            return value
+        }
+        let isTrusted = { (deviceId: String) in self.trusted.devices.contains { $0.deviceId == deviceId } }
+
         switch type {
         case "reply":
-            guard let text = object["text"] as? String, !text.isEmpty, text.count <= 4000 else { return }
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let id = string("id", 1000),
+                  let text = string("text", 4000) else { return }
             notifications.sendReply(id: id, text: text, to: deviceId)
         case "dismiss":
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let id = string("id", 1000) else { return }
             notifications.sendDismiss(id: id, to: deviceId)
+        case "ring":
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId) else { return }
+            ring.toggleRing(deviceId)
+        case "open":
+            guard let target = string("target", 20), Self.openTargets.contains(target),
+                  let url = URL(string: "connect://\(target)") else { return }
+            openURLs?([url])
+        case "media":
+            guard let action = string("action", 20).flatMap(MediaCommandAction.init(rawValue:)) else { return }
+            media.sendCommand(action)
+        case "messages.open":
+            messagesOpen = true
+            messages.open()
+            broadcastThreads()
+        case "messages.close":
+            messagesOpen = false
+            messages.close()
+        case "messages.thread":
+            guard let threadId = string("threadId", 400), messages.threads.contains(where: { $0.id == threadId }) else { return }
+            messages.openThread(threadId)
+        case "messages.send":
+            guard let phoneId = string("phoneId", 200), isTrusted(phoneId), let address = string("address", 64),
+                  let body = string("body", 2000) else { return }
+            messages.send(body: body, to: address, via: phoneId)
         default:
             break
         }
@@ -273,6 +357,72 @@ final class DroppyBridge {
         return message
     }
 
+    // MARK: - Media
+
+    private func mediaChanged(_ latest: [String: NowPlayingState]) {
+        for (deviceId, state) in latest where nowPlaying[deviceId] != state {
+            nowPlaying[deviceId] = state
+            let artworkChanged = sentArtwork[deviceId] != state.artworkData
+            sentArtwork[deviceId] = state.artworkData
+            broadcast(mediaMessage(deviceId: deviceId, state, includeArtwork: artworkChanged))
+        }
+        for deviceId in nowPlaying.keys where latest[deviceId] == nil {
+            nowPlaying[deviceId] = nil
+            sentArtwork[deviceId] = nil
+            broadcast(["type": "media", "deviceId": deviceId, "nowPlaying": NSNull()])
+        }
+    }
+
+    private func mediaMessage(deviceId: String, _ state: NowPlayingState, includeArtwork: Bool) -> [String: Any] {
+        var playing: [String: Any] = [
+            "title": state.title,
+            "artist": state.artist,
+            "isPlaying": state.isPlaying,
+            "positionMs": state.positionMs,
+            "durationMs": state.durationMs,
+            "packageName": state.packageName,
+        ]
+        if includeArtwork, let artwork = state.artworkData { playing["artworkBase64"] = artwork.base64EncodedString() }
+        return ["type": "media", "deviceId": deviceId, "nowPlaying": playing]
+    }
+
+    // MARK: - Messages
+
+    private func broadcastThreads() {
+        guard messagesOpen, !clients.isEmpty else { return }
+        let threads: [[String: Any]] = messages.threads.prefix(100).map { thread in
+            [
+                "id": thread.id,
+                "phoneId": thread.phoneId,
+                "title": thread.title,
+                "address": thread.address,
+                "snippet": thread.snippet,
+                "date": thread.date.timeIntervalSince1970,
+                "outgoing": thread.outgoing,
+                "unread": thread.unread,
+            ]
+        }
+        broadcast(["type": "messages.threads", "threads": threads])
+        var status: [String: Any] = ["type": "messages.status", "loading": messages.loading]
+        if let error = messages.error { status["error"] = error }
+        broadcast(status)
+    }
+
+    private func broadcastHistory() {
+        guard messagesOpen, !clients.isEmpty, let threadId = messages.openThreadId else { return }
+        let items: [[String: Any]] = messages.messages.suffix(100).map { message in
+            [
+                "id": message.id,
+                "date": message.date.timeIntervalSince1970,
+                "outgoing": message.outgoing,
+                "body": message.body,
+                "sending": message.sending,
+                "failed": message.failed,
+            ]
+        }
+        broadcast(["type": "messages.history", "threadId": threadId, "messages": items])
+    }
+
     // MARK: - State
 
     private func broadcastState() {
@@ -294,6 +444,6 @@ final class DroppyBridge {
             }
             return entry
         }
-        return ["type": "state", "devices": devices]
+        return ["type": "state", "devices": devices, "ringing": Array(ring.ringingPeers)]
     }
 }

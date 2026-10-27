@@ -22,6 +22,8 @@ final class BatterySyncManager: ObservableObject {
     static let rearmLevel = Int(GossipCoreKit.batteryRearmLevel())
 
     @Published private(set) var batteryBySenderId: [String: BatteryState] = [:]
+    /// Set by `ConnectApp`: true while the Droppy droplet shows battery alerts itself.
+    var suppressesLowBatteryAlert: () -> Bool = { false }
 
     private weak var transportManager: TransportManager?
     private let identity: IdentityKeyStore
@@ -91,7 +93,7 @@ final class BatterySyncManager: ObservableObject {
                     batteryBySenderId[sender] = BatteryState(level: Int(state.level), isCharging: state.isCharging)
                 }
             case .lowBattery(let sender, let level):
-                onLowBattery(sender, Int(level))
+                if !suppressesLowBatteryAlert() { onLowBattery(sender, Int(level)) }
             case .setState:
                 break
             }

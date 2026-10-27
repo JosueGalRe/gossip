@@ -63,7 +63,8 @@ struct ConnectApp: App {
         _screenMirrorController = StateObject(wrappedValue: screenMirror)
         let pairingViewModel = PairingViewModel(transportManager: transport)
         _pairingViewModel = StateObject(wrappedValue: pairingViewModel)
-        _mediaControlManager = StateObject(wrappedValue: MediaControlManager(transportManager: transport))
+        let mediaControl = MediaControlManager(transportManager: transport)
+        _mediaControlManager = StateObject(wrappedValue: mediaControl)
         let notificationMirror = NotificationMirrorManager(transportManager: transport)
         _notificationMirrorManager = StateObject(wrappedValue: notificationMirror)
         UNUserNotificationCenter.current().delegate = notificationMirror
@@ -88,13 +89,18 @@ struct ConnectApp: App {
             trustedDevicesStore: TrustedDevicesStore.shared,
             bleProximityMonitor: bleMonitor
         )
-        _ringManager = StateObject(wrappedValue: RingManager(transportManager: transport))
+        let ring = RingManager(transportManager: transport)
+        _ringManager = StateObject(wrappedValue: ring)
         let battery = BatterySyncManager(transportManager: transport)
         _batterySyncManager = StateObject(wrappedValue: battery)
         battery.start()
         UniversalControlCoordinator.shared.configure(transport: transport, trustedDevices: TrustedDevicesStore.shared, battery: battery)
-        droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror)
+        droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror,
+                                    ring: ring, media: mediaControl, messages: messagesManager)
         droppyBridge.start()
+        // While the droplet is connected it shows notifications and battery alerts; Gossip's own would be duplicates.
+        notificationMirror.suppressesLocalBanners = { [droppyBridge] in droppyBridge.hasClients }
+        battery.suppressesLowBatteryAlert = { [droppyBridge] in droppyBridge.hasClients }
 
         // Must run unconditionally at process launch, not from the menu-bar
         // dropdown's `.onAppear` (the previous location): for a
@@ -213,6 +219,7 @@ struct ConnectApp: App {
                 }
             }
         }
+        droppyBridge.openURLs = appDelegate.onOpenURLs
 
         // Same reasoning as `transport.start()`/`onOpenURLs` above: must not depend on
         // `MenuBarView`'s content ever having appeared. In particular

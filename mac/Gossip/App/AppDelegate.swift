@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 /// Lifecycle hooks that don't fit naturally into the SwiftUI `App`/`Scene`
 /// structure (e.g. ensuring the app never shows a Dock icon even if launched
@@ -17,6 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .automaticTerminationDisabled, .suddenTerminationDisabled],
                                                          reason: "Keeping paired devices connected")
+        registerAsLoginItem()
+    }
+
+    /// Opens at login, so paired devices (and the Droppy droplet) are connected without launching Gossip by hand. Only the
+    /// copy in /Applications registers, so a build run from Xcode's products folder never claims the login item.
+    private func registerAsLoginItem() {
+        guard Bundle.main.bundleURL.path.hasPrefix("/Applications/"), SMAppService.mainApp.status != .enabled else { return }
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            gossipError("Gossip: could not register as a login item: \(error)")
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

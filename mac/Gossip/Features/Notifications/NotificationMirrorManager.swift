@@ -44,6 +44,10 @@ final class NotificationMirrorManager: NSObject, ObservableObject {
     /// nothing wrong with the transport or listener code on either platform.
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
 
+    /// Set by `ConnectApp`: true while the Droppy droplet is showing phone notifications, so they are not shown twice.
+    /// Called on the transport's queue.
+    var suppressesLocalBanners: () -> Bool = { false }
+
     init(transportManager: TransportManager, identity: IdentityKeyStore = .shared) {
         self.transportManager = transportManager
         self.identity = identity
@@ -131,6 +135,7 @@ final class NotificationMirrorManager: NSObject, ObservableObject {
 
         let postedIdentifier = localIdentifier(for: posted.id, sourceDeviceId: envelope.senderId)
         if book.isStale(postedIdentifier, postedAt: posted.timestamp) { return }
+        if suppressesLocalBanners() { return }
 
         let content = UNMutableNotificationContent()
         content.title = String(posted.appName.prefix(80))

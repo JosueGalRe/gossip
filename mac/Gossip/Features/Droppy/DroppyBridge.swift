@@ -13,9 +13,9 @@ import Security
 /// - `media`: a device's now-playing state, or `nowPlaying: null` when it stopped. Artwork only when it changed.
 /// - `messages.threads`, `messages.history` (the open conversation) and `messages.status` while the client has Messages open.
 ///
-/// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `ring` (`deviceId`), `open` (`target`: pair, mirror,
-/// messages), `media` (`action`), `messages.open` / `messages.close`, `messages.thread` (`threadId`) and `messages.send`
-/// (`phoneId`, `address`, `body`).
+/// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `action` (`deviceId`, `id`, `index`), `ring` (`deviceId`),
+/// `open` (`target`: pair, mirror, messages), `media` (`action`, optional `seekMs`), `volume` (`direction`),
+/// `messages.open` / `messages.close`, `messages.thread` (`threadId`) and `messages.send` (`phoneId`, `address`, `body`).
 ///
 /// All bookkeeping is on the main queue; each client gets a serial queue for its blocking writes.
 final class DroppyBridge {
@@ -284,6 +284,10 @@ final class DroppyBridge {
         case "dismiss":
             guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let id = string("id", 1000) else { return }
             notifications.sendDismiss(id: id, to: deviceId)
+        case "action":
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let id = string("id", 1000),
+                  let index = object["index"] as? Int, (0..<10).contains(index) else { return }
+            notifications.sendAction(id: id, index: index, to: deviceId)
         case "ring":
             guard let deviceId = string("deviceId", 200), isTrusted(deviceId) else { return }
             ring.toggleRing(deviceId)
@@ -293,7 +297,12 @@ final class DroppyBridge {
             openURLs?([url])
         case "media":
             guard let action = string("action", 20).flatMap(MediaCommandAction.init(rawValue:)) else { return }
-            media.sendCommand(action)
+            // A seek travels with the command that keeps the current state: play while playing, pause while paused.
+            let seekMs = (object["seekMs"] as? Int).map { max(0, $0) }
+            media.sendCommand(action, seekMs: seekMs)
+        case "volume":
+            guard let direction = string("direction", 4), direction == "up" || direction == "down" else { return }
+            media.sendVolume(up: direction == "up")
         case "messages.open":
             messagesOpen = true
             messages.open()
@@ -354,6 +363,24 @@ final class DroppyBridge {
             "timestamp": posted.timestamp,
         ]
         if let icon = posted.iconBase64 { message["iconBase64"] = icon }
+        if let avatar = posted.avatarBase64 { message["avatarBase64"] = avatar }
+        if let picture = posted.pictureBase64 { message["pictureBase64"] = picture }
+        if let actions = posted.actions, !actions.isEmpty {
+            message["actions"] = actions.map { ["index": $0.index, "title": $0.title] as [String: Any] }
+        }
+        if let replies = posted.smartReplies, !replies.isEmpty { message["smartReplies"] = replies }
+        if let live = posted.live {
+            var entry: [String: Any] = [
+                "indeterminate": live.indeterminate ?? false,
+                "countDown": live.countDown ?? false,
+                "promoted": live.promoted ?? false,
+            ]
+            if let category = live.category { entry["category"] = category }
+            if let progress = live.progress { entry["progress"] = progress }
+            if let max = live.progressMax { entry["progressMax"] = max }
+            if let base = live.chronometerBaseMs { entry["chronometerBaseMs"] = base }
+            message["live"] = entry
+        }
         return message
     }
 

@@ -157,6 +157,18 @@ final class MediaControlManager: ObservableObject {
         try? transportManager.send(envelope: envelope)
     }
 
+    /// One volume step of the phone's music stream, `up` or `down`; only the phone acts on it (`media.volume`).
+    func sendVolume(up: Bool) {
+        guard let transportManager, let deviceId = effectiveSelectedDeviceId else { return }
+        let envelope = Envelope(
+            type: "media.volume",
+            senderId: identity.deviceId,
+            recipientId: deviceId,
+            payload: .object(["direction": .string(up ? "up" : "down"), "commandId": .string(UUID().uuidString)])
+        )
+        try? transportManager.send(envelope: envelope)
+    }
+
     func play() { sendCommand(.play) }
     func pause() { sendCommand(.pause) }
     func next() { sendCommand(.next) }

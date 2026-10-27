@@ -257,7 +257,7 @@ final class NotificationMirrorManager: NSObject, ObservableObject {
     /// Targeted at the specific device that posted the original notification — not
     /// broadcast — since with more than one Android device in the mesh, a reply must
     /// only be delivered to whichever one actually owns that notification/conversation.
-    private func sendReply(id: String, text: String, to sourceDeviceId: String) {
+    func sendReply(id: String, text: String, to sourceDeviceId: String) {
         guard let transportManager else { return }
         do {
             // The payload shape (and the per-attempt id the receiver de-duplicates on) is the core's.
@@ -280,7 +280,7 @@ final class NotificationMirrorManager: NSObject, ObservableObject {
     /// Targeted at the specific device that posted the original notification — see
     /// `sendReply`'s doc for why this can't be a broadcast once there's more than one
     /// Android device in the mesh.
-    private func sendDismiss(id: String, to sourceDeviceId: String) {
+    func sendDismiss(id: String, to sourceDeviceId: String) {
         guard let transportManager else { return }
         do {
             let payloadData = try JSONEncoder().encode(NotificationDismissPayload(id: id))

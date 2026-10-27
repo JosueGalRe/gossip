@@ -26,6 +26,7 @@ struct ConnectApp: App {
     private let messagesManager: MessagesManager
     @StateObject private var ringManager: RingManager
     @StateObject private var batterySyncManager: BatterySyncManager
+    private let droppyBridge: DroppyBridge
     private let deviceMirroringWindowBox = DeviceMirroringWindowBox()
 
     /// Holds the `connectionState` subscription that starts and stops clipboard watching and refreshes the notification
@@ -92,6 +93,8 @@ struct ConnectApp: App {
         _batterySyncManager = StateObject(wrappedValue: battery)
         battery.start()
         UniversalControlCoordinator.shared.configure(transport: transport, trustedDevices: TrustedDevicesStore.shared, battery: battery)
+        droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror)
+        droppyBridge.start()
 
         // Must run unconditionally at process launch, not from the menu-bar
         // dropdown's `.onAppear` (the previous location): for a

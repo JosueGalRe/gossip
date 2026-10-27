@@ -190,6 +190,9 @@ class NotificationListenerImpl : NotificationListenerService() {
         // EXTRA_IS_MIRROR's doc for why this must be a content-based check, not a package/id exclusion.
         if (sbn.notification.extras.getBoolean(EXTRA_IS_MIRROR, false)) return false
         if (!sbn.isClearable && sbn.notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return false
+        // A group summary ("4 messages from 2 chats") only restates its children, which are mirrored on their own and
+        // carry the reply action; mirroring it too shows the summary last, in place of the actual message.
+        if (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false
         // Media playback notifications are already covered end to end by the dedicated media.nowplaying and
         // media.command pipeline, so a mirrored copy would just be redundant clutter.
         if (sbn.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) return false

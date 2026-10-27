@@ -224,6 +224,11 @@ impl GossipCore {
         self.lock().set_lan_grace_ms(ms);
     }
 
+    /// Whether a trusted peer's roster may add devices this one never paired with (default true).
+    pub fn set_accepts_introductions(&self, accept: bool) {
+        self.lock().set_accepts_introductions(accept);
+    }
+
     /// Loads the persisted mesh topic at startup (from the last `TopicChanged`).
     pub fn set_topic(&self, secret: Vec<u8>, epoch: u64) -> Result<Vec<Action>, GossipError> {
         Ok(actions(

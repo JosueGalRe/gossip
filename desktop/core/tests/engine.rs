@@ -613,6 +613,27 @@ fn revocation_disconnects_gossips_and_cannot_be_undone_by_gossip() {
 }
 
 #[test]
+fn roster_gossip_adds_nobody_when_introductions_are_off() {
+    let mut net = Net::new();
+    let a = net.add(1, DeviceType::Mac);
+    let b = net.add(2, DeviceType::AndroidPhone);
+    net.pair(b, a);
+    net.nodes[a].core.set_accepts_introductions(false);
+    let c_key = StaticKeypair::from_secret_bytes([3; 32]).public_bytes();
+    let Value::Object(payload) = json!({"devices": [
+        {"deviceId": id_of(3), "publicKey": B64.encode(c_key), "deviceName": "Tablet", "deviceType": "android-tablet"},
+    ]}) else {
+        unreachable!()
+    };
+    let m = feature_msg(&mut net, b, "trust.roster_update")
+        .to(&id_of(1))
+        .with_payload(payload);
+    net.send(b, m).unwrap();
+    assert!(!net.nodes[a].core.trust().is_trusted(&id_of(3)));
+    assert!(net.nodes[a].core.trust().is_trusted(&id_of(2)), "the paired peer stays trusted");
+}
+
+#[test]
 fn roster_gossip_introduces_new_devices_but_never_overwrites() {
     let mut net = Net::new();
     let a = net.add(1, DeviceType::Mac);

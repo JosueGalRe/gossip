@@ -148,18 +148,26 @@ class ScrcpyServerSession private constructor(
             }, "scrcpy-kill").apply { isDaemon = true }.start()
         }
 
-        /** Kills every scrcpy session of ours (servers and relays) — for a fresh start, when none can be live. */
+        /** A session id carrying Gossip's prefix, so a sweep can tell our servers from someone else's scrcpy. */
+        private fun newScid(): String = SCID_PREFIX + "%04x".format(SecureRandom().nextInt() and 0xffff)
+
+        /**
+         * Kills every scrcpy session of ours (servers and relays) — for a fresh start, when none can be live. Only servers
+         * whose scid has our prefix: a scrcpy the user runs from a computer is left alone.
+         */
         fun killAllStale() {
             Thread({
                 runCatching {
                     ShizukuShell.exec(
                         "sh", "-c",
-                        "pkill -f 'com.genymobile.scrcpy.Server'; pkill -f 'dev.vmd1.gossip.features.screenmirror.ShellRelay'"
+                        "pkill -f 'scid=$SCID_PREFIX'; pkill -f 'dev.vmd1.gossip.features.screenmirror.ShellRelay'"
                     ).waitFor()
                 }.onFailure { Log.w(TAG, "couldn't clear stale sessions: ${it.message}") }
             }, "scrcpy-sweep").apply { isDaemon = true }.start()
         }
         const val SCRCPY_VERSION = "4.1"
+        /** First half of every scid Gossip generates (still a valid 31-bit hex id). */
+        private const val SCID_PREFIX = "6a05"
         private const val ASSET = "scrcpy-server-v4.1.jar"
         private const val REMOTE_JAR = "/data/local/tmp/gossip-scrcpy-server.jar"
         private const val MAX_PACKET = 16 * 1024 * 1024
@@ -174,7 +182,7 @@ class ScrcpyServerSession private constructor(
          */
         fun open(context: Context, options: Options = Options()): ScrcpyServerSession {
             pushJar(context)
-            val scid = "%08x".format(SecureRandom().nextInt() and 0x7fffffff)
+            val scid = newScid()
             val socketName = "scrcpy_$scid"
             val serverCmd = "CLASSPATH=$REMOTE_JAR exec app_process / com.genymobile.scrcpy.Server " +
                 "$SCRCPY_VERSION scid=$scid log_level=info tunnel_forward=true " +
@@ -259,7 +267,7 @@ class ScrcpyServerSession private constructor(
          */
         fun openControlOnly(context: Context): ScrcpyServerSession {
             pushJar(context)
-            val scid = "%08x".format(SecureRandom().nextInt() and 0x7fffffff)
+            val scid = newScid()
             val socketName = "scrcpy_$scid"
             val serverCmd = "CLASSPATH=$REMOTE_JAR exec app_process / com.genymobile.scrcpy.Server " +
                 "$SCRCPY_VERSION scid=$scid log_level=info tunnel_forward=true video=false audio=false control=true cleanup=false"

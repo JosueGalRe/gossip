@@ -69,7 +69,10 @@ final class CoreBridge {
     static let virtualConnBase: UInt64 = 1 << 63
 
     /// - Parameter disabledFeatures: raw values of the features turned off on this device (`FeatureSettings`).
-    init(identity: IdentityKeyStore, deviceName: String, trustedDevices: TrustedDevicesStore, disabledFeatures: [String]) throws {
+    /// `acceptsIntroductions`: whether a peer's roster may add devices this Mac never paired with. Off in the app; tests
+    /// that exercise gossip turn it on.
+    init(identity: IdentityKeyStore, deviceName: String, trustedDevices: TrustedDevicesStore, disabledFeatures: [String],
+         acceptsIntroductions: Bool = false) throws {
         core = try GossipCoreKit.GossipCore(
             deviceId: identity.deviceId,
             deviceName: deviceName,
@@ -80,6 +83,7 @@ final class CoreBridge {
             disabledFeatures: disabledFeatures,
             clock: nil
         )
+        core.setAcceptsIntroductions(accept: acceptsIntroductions)
     }
 
     // MARK: - Connections

@@ -29,10 +29,10 @@ import org.junit.Test
  * sees them. The engine runs through JNA from a host build of `libgossip_ffi` (see `app/build.gradle.kts`).
  */
 class CoreBridgeTest {
-    private class Peer(val name: String, val type: DeviceType, disabled: List<String> = emptyList(), identity: uniffi.gossip_ffi.NewIdentity = uniffi.gossip_ffi.generateIdentity(), val store: TrustedDevicesStore = TrustedDevicesStore(FakeSharedPreferences())) {
+    private class Peer(val name: String, val type: DeviceType, disabled: List<String> = emptyList(), identity: uniffi.gossip_ffi.NewIdentity = uniffi.gossip_ffi.generateIdentity(), val store: TrustedDevicesStore = TrustedDevicesStore(FakeSharedPreferences()), acceptsIntroductions: Boolean = false) {
         val identity = identity
         val deviceId = identity.deviceId
-        val bridge = CoreBridge(identity.deviceId, identity.noiseSecret, identity.signingSeed, name, type, store, disabled)
+        val bridge = CoreBridge(identity.deviceId, identity.noiseSecret, identity.signingSeed, name, type, store, disabled, acceptsIntroductions)
         val events = mutableListOf<BridgeAction>()
 
         fun delivered(type: String): List<Envelope> = events.filterIsInstance<BridgeAction.Deliver>().map { it.envelope }.filter { it.type == type }
@@ -173,7 +173,7 @@ class CoreBridgeTest {
     fun appOnlyFieldsSurviveEngineSnapshots() {
         val wire = Wire()
         val phone = Peer("phone", DeviceType.ANDROID_PHONE)
-        val mac = Peer("mac", DeviceType.MAC)
+        val mac = Peer("mac", DeviceType.MAC, acceptsIntroductions = true)
         pairByScanning(wire, shower = mac, scanner = phone)
         mac.store.setFallbackHost(phone.deviceId, "100.64.0.9")
         mac.store.setBeaconKey(phone.deviceId, ByteArray(32) { 7 })

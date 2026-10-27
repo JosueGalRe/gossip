@@ -32,7 +32,9 @@ class CoreBridge(
     deviceName: String,
     deviceType: DeviceType,
     private val trustedDevices: TrustedDevicesStore,
-    disabledFeatures: List<String>
+    disabledFeatures: List<String>,
+    /** Whether a peer's roster may add devices this phone never paired with. Off in the app; tests that exercise gossip turn it on. */
+    acceptsIntroductions: Boolean = false
 ) {
     /** What [TransportManager] must do (or tell the rest of the app) as a result of one engine call. */
     sealed class BridgeAction {
@@ -105,7 +107,7 @@ class CoreBridge(
         trustJson = trustedDevices.exportCoreSnapshot(),
         disabledFeatures = disabledFeatures,
         clock = null
-    )
+    ).also { it.setAcceptsIntroductions(acceptsIntroductions) }
 
     // ---- Connections ------------------------------------------------------------------------------------------
 

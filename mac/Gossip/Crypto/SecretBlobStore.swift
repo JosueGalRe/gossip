@@ -1,8 +1,9 @@
 import Foundation
+import Security
 
-/// Where a small secret blob (the identity keys, the trust roster) lives: a `0600` file under Application Support
-/// (`FileBlobStore`), written atomically via `PrivateFile`. Tests get a separate scratch directory per process so
-/// parallel runs do not share state.
+/// Where a small secret blob (the identity keys, the trust roster) lives: the login Keychain when this build has a team
+/// ID (`KeychainBlobStore`), otherwise a `0600` file under Application Support (`FileBlobStore`), written atomically via
+/// `PrivateFile`. Tests get a separate scratch directory per process so parallel runs do not share state.
 protocol SecretBlobStore {
     func read() -> Data?
     @discardableResult func write(_ data: Data) -> Bool
@@ -10,17 +11,12 @@ protocol SecretBlobStore {
 
 /// Picks the blob store for `account`.
 ///
-/// This used to be the login Keychain, with a hand-rolled access-control list trusting this app by path (instead
-/// of the default per-build code-hash list) so rebuilds of the self-signed binary would not keep re-prompting for
-/// the login password. That access list still has to be *granted* once per item — itself a privileged Keychain
-/// operation — which shows exactly that "wants to change access permissions" prompt. A plain Apple Developer ID
-/// would give the app a stable Team Identifier and a real Keychain access-group entitlement, which never prompts
-/// at all; without paying for one, there is no Keychain ACL configuration (tried and confirmed empirically: an
-/// "allow all applications" ACL still blocks on the same prompt for a different process) that avoids it.
-///
-/// Deliberately moved to a private file instead, on request: no prompt, ever, at the cost of this being readable
-/// by anything else already running as this user — the same exposure an actually-unrestricted Keychain ACL would
-/// have had anyway, without the part where Keychain still asks permission to grant it.
+/// Upstream moved these from the Keychain to private files because a self-signed build has no team ID: the login
+/// Keychain's partition list then names one build's code hash, and every rebuild asks for the login password again.
+/// Signed with a team (a free Apple Development certificate is enough), the list names `teamid:…`, which every build
+/// of that team matches, so the app reads its own items without a prompt. Such a build keeps the secrets in the
+/// Keychain, out of reach of other processes running as this user, and moves any existing file there on first read.
+/// A team-less build still uses the files.
 enum ProductionBlobStore {
     static var isRunningUnderTest: Bool {
         let env = ProcessInfo.processInfo.environment
@@ -28,8 +24,22 @@ enum ProductionBlobStore {
     }
 
     static func make(account: String) -> SecretBlobStore {
-        FileBlobStore(url: directory.appendingPathComponent("\(account).secret"))
+        let file = FileBlobStore(url: directory.appendingPathComponent("\(account).secret"))
+        guard !isRunningUnderTest, hasTeamIdentifier else { return file }
+        return KeychainBlobStore(account: account, legacyFile: file)
     }
+
+    /// Whether this process is signed with a team ID (Apple Development or Developer ID), not ad hoc or self-signed.
+    static let hasTeamIdentifier: Bool = {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let team = (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String else { return false }
+        return !team.isEmpty
+    }()
 
     private static let directory: URL = {
         let dir: URL
@@ -51,4 +61,56 @@ struct FileBlobStore: SecretBlobStore {
 
     func read() -> Data? { try? Data(contentsOf: url) }
     func write(_ data: Data) -> Bool { PrivateFile.write(data, to: url) }
+}
+
+/// A generic-password item in the login Keychain. The file an earlier build wrote is moved in on first read, and
+/// removed only once the Keychain holds its contents, so a failure never loses the identity (which would mean pairing
+/// every device again).
+struct KeychainBlobStore: SecretBlobStore {
+    static let service = "dev.vmd1.gossip.secrets"
+    let account: String
+    let legacyFile: FileBlobStore
+
+    private var query: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: Self.service,
+         kSecAttrAccount as String: account]
+    }
+
+    func read() -> Data? {
+        var lookup = query
+        lookup[kSecReturnData as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        var status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        // A nil answer makes the caller create a new identity (and every device would have to pair again), so a
+        // transient failure, such as a Keychain still locked right after login, is retried before giving up.
+        for _ in 0..<5 where status != errSecSuccess && status != errSecItemNotFound {
+            Thread.sleep(forTimeInterval: 1)
+            status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        }
+        if status == errSecSuccess, let data = result as? Data { return data }
+        if status != errSecItemNotFound {
+            gossipError("Gossip: Keychain read of \(account) failed (\(status)); using the file")
+        }
+        guard let data = legacyFile.read() else { return nil }
+        if write(data) { NSLog("Gossip: moved \(account) from its file into the Keychain") }
+        return data
+    }
+
+    func write(_ data: Data) -> Bool {
+        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrLabel as String] = "Gossip \(account)"
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            gossipError("Gossip: Keychain write of \(account) failed (\(status)); keeping the file")
+            return legacyFile.write(data)
+        }
+        try? FileManager.default.removeItem(at: legacyFile.url)
+        return true
+    }
 }

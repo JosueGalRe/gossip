@@ -13,11 +13,12 @@ final class CoreBridgeTests: XCTestCase {
         let bridge: CoreBridge
         var events: [CoreBridge.BridgeAction] = []
 
-        init(_ name: String, directory: URL, disabledFeatures: [String] = []) throws {
+        init(_ name: String, directory: URL, disabledFeatures: [String] = [], acceptsIntroductions: Bool = false) throws {
             self.name = name
             identity = IdentityKeyStore(fileURL: directory.appendingPathComponent("\(name)-identity.json"))
             trust = TrustedDevicesStore(fileURL: directory.appendingPathComponent("\(name)-trusted.json"))
-            bridge = try CoreBridge(identity: identity, deviceName: name, trustedDevices: trust, disabledFeatures: disabledFeatures)
+            bridge = try CoreBridge(identity: identity, deviceName: name, trustedDevices: trust, disabledFeatures: disabledFeatures,
+                                    acceptsIntroductions: acceptsIntroductions)
         }
 
         var deviceId: String { identity.deviceId }
@@ -154,7 +155,7 @@ final class CoreBridgeTests: XCTestCase {
 
     func testAppOnlyFieldsSurviveEngineSnapshots() throws {
         let wire = Wire()
-        let mac = try Peer("mac", directory: directory), phone = try Peer("phone", directory: directory)
+        let mac = try Peer("mac", directory: directory, acceptsIntroductions: true), phone = try Peer("phone", directory: directory)
         try pair(wire, shower: mac, scanner: phone)
         mac.trust.setFallbackHost(deviceId: phone.deviceId, fallbackHost: "100.64.0.9")
         mac.trust.setLockOnLeaveEnabled(deviceId: phone.deviceId, enabled: true)

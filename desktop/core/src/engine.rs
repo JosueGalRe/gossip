@@ -366,6 +366,8 @@ pub struct Core<E: Env> {
     relay_dialing: HashSet<String>,
     next_virtual: ConnId,
     lan_grace_ms: i64,
+    /// Whether a trusted peer's `trust.roster_update` may add devices this one never paired with (default true).
+    accepts_introductions: bool,
     /// When a trusted device was first noticed with no live link.
     link_absent_since: HashMap<String, i64>,
     /// Per device: consecutive failed relayed dials and the earliest next attempt.
@@ -405,6 +407,7 @@ impl<E: Env> Core<E> {
             relay_dialing: HashSet::new(),
             next_virtual: VIRTUAL_CONN_BASE,
             lan_grace_ms: DEFAULT_LAN_GRACE_MS,
+            accepts_introductions: true,
             link_absent_since: HashMap::new(),
             relay_retry: HashMap::new(),
             allow_restricted_for_tests: false,
@@ -1216,6 +1219,9 @@ impl<E: Env> Core<E> {
     // ---- Trust gossip ------------------------------------------------------------------------------------------
 
     fn handle_roster_update(&mut self, envelope: &Envelope, out: &mut Out) {
+        if !self.accepts_introductions {
+            return;
+        }
         let now = self.env.now_ms();
         let outcome = self
             .trust
@@ -1531,6 +1537,12 @@ impl<E: Env> Core<E> {
     /// How long a trusted peer must have had no live link before it is dialed through the relay (default 8 s).
     pub fn set_lan_grace_ms(&mut self, ms: i64) {
         self.lan_grace_ms = ms.max(0);
+    }
+
+    /// Off: only pairing on this device grants trust, and a peer's roster can no longer vouch for new devices. A
+    /// compromised peer could otherwise add an identity of its choosing with full access, without a prompt.
+    pub fn set_accepts_introductions(&mut self, accept: bool) {
+        self.accepts_introductions = accept;
     }
 
     pub fn relay_status(&self) -> RelayStatus {

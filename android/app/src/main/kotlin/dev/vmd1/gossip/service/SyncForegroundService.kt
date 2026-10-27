@@ -524,8 +524,8 @@ class SyncForegroundService : Service() {
             manager.createNotificationChannel(NotificationChannel(REMOTE_CHANNEL_ID, "Remote access", NotificationManager.IMPORTANCE_HIGH))
         }
         val text = when {
-            viewing && controlled -> "A paired device is viewing this screen and using its mouse and keyboard here."
-            viewing -> "A paired device is viewing this screen."
+            viewing && controlled -> "A paired device is viewing this phone's screen or apps and using its mouse and keyboard here."
+            viewing -> "A paired device is viewing this phone's screen or apps."
             else -> "A paired device is using its mouse and keyboard on this one."
         }
         val builder = NotificationCompat.Builder(this, REMOTE_CHANNEL_ID)

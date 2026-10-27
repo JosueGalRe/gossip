@@ -243,8 +243,8 @@ class ScreenMirrorState(
         while (recentlyEnded.size > RECENT_CACHE) recentlyEnded.remove(recentlyEnded.first())
     }
 
-    /** Only a session showing the phone's own screen counts: an app window runs on a separate virtual display, so nobody is watching this screen. */
-    private fun publish() { _isMirroring.value = actives.values.any { !it.isApp } }
+    /** App windows count too: they run on a virtual display, but a paired device still sees and drives this phone's apps. */
+    private fun publish() { _isMirroring.value = actives.isNotEmpty() }
 
     private fun sendReady(to: String, sessionId: String, r: ScreenSession.Ready) {
         if (logReadyToken) Log.d(TAG, "READY sessionId=$sessionId port=${r.port}")

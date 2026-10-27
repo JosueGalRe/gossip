@@ -155,9 +155,16 @@ struct ConnectApp: App {
         // silently dropped by `AppDelegate.application(_:open:)`'s `onOpenURLs?(urls)`
         // no-op on `nil` until the user opened the menu bar tray at least once after
         // launch.
-        appDelegate.onOpenURLs = { [dndSyncManager, bleMonitor, debugHotspotClientBox, screenMirror, transport, battery, deviceMirroringWindowBox, messagesManager] urls in
+        appDelegate.onOpenURLs = { [dndSyncManager, bleMonitor, debugHotspotClientBox, screenMirror, transport, battery, deviceMirroringWindowBox, messagesManager, pairingViewModel, onboardingPairingWindowBox] urls in
             for url in urls {
-                if url.host == "messages" {
+                if url.host == "pair" {
+                    // `open connect://pair`: the pairing window without the menu bar icon, which a crowded menu bar hides.
+                    pairingViewModel.startPairing()
+                    let window = PairingWindow(pairingViewModel: pairingViewModel)
+                    onboardingPairingWindowBox.window = window
+                    window.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else if url.host == "messages" {
                     // Sent by the "Gossip Messages" launcher app: show the Messages window.
                     MessagesWindow.show(manager: messagesManager)
                 } else if url.host == "mirror" {

@@ -26,6 +26,7 @@ class ShareFilesActivity : Activity() {
             intent.clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }.orEmpty()
         }.filter { it.scheme == "content" }.distinct()
         if (uris.isEmpty()) {
+            dev.vmd1.gossip.util.Log.w("ShareFiles", "Nothing to send: action=${intent.action} type=${intent.type}")
             Toast.makeText(this, "Share a file to send it to your Mac.", Toast.LENGTH_LONG).show()
             finish(); return
         }
@@ -34,6 +35,13 @@ class ShareFilesActivity : Activity() {
         val devices = trusted.allDevices().filter {
             it.deviceType == DeviceType.MAC && !trusted.isProvisional(it.deviceId) &&
                 it.deviceId in (transport?.connectedDeviceIds?.value ?: emptySet())
+        }
+        if (devices.isEmpty()) {
+            // Why no Mac qualified: release builds keep only warnings, and this is the one place the reason shows.
+            dev.vmd1.gossip.util.Log.w("ShareFiles", "No Mac to send to: transport=${transport != null} " +
+                "direct=${transport?.connectedDeviceIds?.value?.size} relayed=${transport?.relayedDeviceIds?.value?.size} " +
+                "macs=${trusted.allDevices().count { it.deviceType == DeviceType.MAC }} " +
+                "provisional=${trusted.allDevices().count { trusted.isProvisional(it.deviceId) }}")
         }
         when (devices.size) {
             0 -> {
@@ -59,6 +67,7 @@ class ShareFilesActivity : Activity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             })
         } catch (e: Exception) {
+            dev.vmd1.gossip.util.Log.w("ShareFiles", "Couldn't start the transfer", e)
             Toast.makeText(this, "Couldn't start file transfer: ${e.message}", Toast.LENGTH_LONG).show()
         }
         finish()

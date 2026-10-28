@@ -20,6 +20,7 @@ struct ConnectApp: App {
     @StateObject private var bleProximityMonitor: BLEProximityMonitor
     @StateObject private var hotspotStateManager: HotspotStateManager
     @StateObject private var instantHotspot: InstantHotspot
+    @StateObject private var fileTransferManager: FileTransferManager
     private let lockOnLeaveManager: LockOnLeaveManager
     /// Shares this Mac's BLE beacon key (a direct-only state slot) and stores peers'; held for its handlers.
     private let beaconKeyManager: BeaconKeyManager
@@ -89,6 +90,8 @@ struct ConnectApp: App {
         _hotspotStateManager = StateObject(wrappedValue: hotspotStates)
         let hotspot = InstantHotspot(states: hotspotStates, ble: bleMonitor)
         _instantHotspot = StateObject(wrappedValue: hotspot)
+        let fileTransfer = FileTransferManager(transport: transport)
+        _fileTransferManager = StateObject(wrappedValue: fileTransfer)
         lockOnLeaveManager = LockOnLeaveManager(
             transportManager: transport,
             trustedDevicesStore: TrustedDevicesStore.shared,
@@ -102,7 +105,7 @@ struct ConnectApp: App {
         UniversalControlCoordinator.shared.configure(transport: transport, trustedDevices: TrustedDevicesStore.shared, battery: battery)
         droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror,
                                     ring: ring, media: mediaControl, messages: messagesManager, screenMirror: screenMirror,
-                                    hotspot: hotspot, clipboard: clipboardSync)
+                                    hotspot: hotspot, clipboard: clipboardSync, files: fileTransfer)
         droppyBridge.start()
         // While the droplet is connected it shows notifications and battery alerts; Gossip's own would be duplicates.
         notificationMirror.suppressesLocalBanners = { [droppyBridge] in droppyBridge.hasClients }

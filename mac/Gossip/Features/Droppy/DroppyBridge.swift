@@ -18,12 +18,14 @@ import Security
 /// - `clipboard`: a peer's clipboard just landed on this Mac (`deviceId`, `text` cut to 500 characters, or `image`, a
 ///   small PNG thumbnail).
 /// - `hotspot.result` (`deviceId`, `ok`) after a `hotspot` request; `error` (`message`) when a mirror or app window fails.
+/// - `file.progress`: every file transfer this session (`id`, `deviceId`, `name`, `size`, `done`, `outgoing`, `state`);
+///   `file.received` (`deviceId`, `path`) when a file from a device is saved in Downloads.
 ///
 /// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `action` (`deviceId`, `id`, `index`), `ring` (`deviceId`),
 /// `open` (`target`: pair, mirror, messages), `media` (`action`, optional `seekMs`), `volume` (`direction`),
 /// `messages.open` / `messages.close`, `messages.thread` (`threadId`), `messages.send` (`phoneId`, `address`, `body`),
-/// `apps` (`deviceId`), `apps.close`, `app.open` (`deviceId`, `package`), `dnd` (`deviceId`, `enabled`) and `hotspot`
-/// (`deviceId`, `enabled`).
+/// `apps` (`deviceId`), `apps.close`, `app.open` (`deviceId`, `package`), `dnd` (`deviceId`, `enabled`), `hotspot`
+/// (`deviceId`, `enabled`), `files.send` (`deviceId`, `paths`) and `file.cancel` (`id`).
 ///
 /// All bookkeeping is on the main queue; each client gets a serial queue for its blocking writes.
 final class DroppyBridge {
@@ -60,6 +62,7 @@ final class DroppyBridge {
     private let screenMirror: ScreenMirrorController
     private let hotspot: InstantHotspot
     private let clipboard: ClipboardSyncManager
+    private let files: FileTransferManager
     private let trusted: TrustedDevicesStore
 
     private var listenFD: Int32 = -1
@@ -85,7 +88,8 @@ final class DroppyBridge {
 
     init(transport: TransportManager, battery: BatterySyncManager, notifications: NotificationMirrorManager,
          ring: RingManager, media: MediaControlManager, messages: MessagesManager, screenMirror: ScreenMirrorController,
-         hotspot: InstantHotspot, clipboard: ClipboardSyncManager, trusted: TrustedDevicesStore = .shared) {
+         hotspot: InstantHotspot, clipboard: ClipboardSyncManager, files: FileTransferManager,
+         trusted: TrustedDevicesStore = .shared) {
         self.transport = transport
         self.battery = battery
         self.notifications = notifications
@@ -95,6 +99,7 @@ final class DroppyBridge {
         self.screenMirror = screenMirror
         self.hotspot = hotspot
         self.clipboard = clipboard
+        self.files = files
         self.trusted = trusted
     }
 
@@ -118,6 +123,13 @@ final class DroppyBridge {
                 broadcastState()
             }
         }
+        files.onReceived = { [weak self] deviceId, url in
+            self?.broadcast(["type": "file.received", "deviceId": deviceId, "path": url.path])
+        }
+        files.$transfers
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transfers in self?.broadcastTransfers(transfers) }
+            .store(in: &cancellables)
         clipboard.onRemoteCopy = { [weak self] deviceId, text, png in
             DispatchQueue.main.async { self?.broadcastClipboard(from: deviceId, text: text, png: png) }
         }
@@ -392,6 +404,15 @@ final class DroppyBridge {
             guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let enabled = object["enabled"] as? Bool else { return }
             try? transport?.send(envelope: Envelope(type: "dnd.set", senderId: IdentityKeyStore.shared.deviceId,
                                                     recipientId: deviceId, payload: .object(["enabled": .bool(enabled)])))
+        case "files.send":
+            // Files the user dropped on the droplet or picked there; regular files only, checked by the manager.
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId),
+                  let paths = object["paths"] as? [String], !paths.isEmpty, paths.count <= 100 else { return }
+            let urls = paths.filter { $0.hasPrefix("/") && $0.count < 4096 }.map { URL(fileURLWithPath: $0) }
+            if let problem = files.send(urls, to: deviceId) { broadcast(["type": "error", "message": problem]) }
+        case "file.cancel":
+            guard let id = string("id", 64) else { return }
+            files.cancel(id)
         case "hotspot":
             guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let enabled = object["enabled"] as? Bool else { return }
             hotspot.request(deviceId, enable: enabled) { [weak self] ok in
@@ -531,6 +552,15 @@ final class DroppyBridge {
     }
 
     // MARK: - State
+
+    private func broadcastTransfers(_ transfers: [String: FileTransferManager.Transfer]) {
+        guard !clients.isEmpty, !transfers.isEmpty else { return }
+        let list: [[String: Any]] = transfers.values.map { transfer in
+            ["id": transfer.id, "deviceId": transfer.deviceId, "name": transfer.name, "size": transfer.size,
+             "done": transfer.done, "outgoing": transfer.outgoing, "state": transfer.state.rawValue]
+        }
+        broadcast(["type": "file.progress", "transfers": list])
+    }
 
     private func broadcastClipboard(from deviceId: String, text: String?, png: Data?) {
         var message: [String: Any] = ["type": "clipboard", "deviceId": deviceId]

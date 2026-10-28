@@ -97,6 +97,12 @@ final class TransportManager: ObservableObject {
     /// `ClipboardSyncManager` for image sync) can consume both together. See
     /// `docs/wire-protocol.md`'s "Large binary payloads" section.
     var onRawFrameReceived: ((Envelope, Data) -> Void)?
+    private var rawFrameHandlers: [(Envelope, Data) -> Void] = []
+
+    /// Another consumer of raw frames besides `onRawFrameReceived` (file transfer next to clipboard images). Main queue.
+    func addOnRawFrameReceived(_ handler: @escaping (Envelope, Data) -> Void) {
+        DispatchQueue.main.async { self.rawFrameHandlers.append(handler) }
+    }
 
     /// Fired when a Noise handshake completes with a peer that is not yet in
     /// `TrustedDevicesStore`. `PairingViewModel` uses this to prompt the user
@@ -895,7 +901,10 @@ final class TransportManager: ObservableObject {
                 router.route(envelope)
                 DispatchQueue.main.async { [weak self] in
                     self?.onReceive?(envelope)
-                    if let raw { self?.onRawFrameReceived?(envelope, raw) }
+                    if let raw {
+                        self?.onRawFrameReceived?(envelope, raw)
+                        self?.rawFrameHandlers.forEach { $0(envelope, raw) }
+                    }
                 }
 
             case .heard(let deviceId):

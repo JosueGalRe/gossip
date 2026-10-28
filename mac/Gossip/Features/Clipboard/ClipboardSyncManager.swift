@@ -22,6 +22,8 @@ final class ClipboardSyncManager: ObservableObject {
 
     private var timer: Timer?
     private var lastChangeCount: Int
+    /// A peer's clipboard was just written to this Mac's pasteboard: the peer, and the text or the PNG. Main queue.
+    var onRemoteCopy: ((_ deviceId: String, _ text: String?, _ png: Data?) -> Void)?
 
     init(
         transportManager: TransportManager,
@@ -35,7 +37,7 @@ final class ClipboardSyncManager: ObservableObject {
 
         transportManager.addOnStateChanged { [weak self] change in
             guard change.slot == GossipCoreKit.clipboardTextSlot(), let json = change.valueJSON else { return }
-            self?.handleIncomingText(valueJSON: json)
+            self?.handleIncomingText(valueJSON: json, from: change.deviceId)
         }
         transportManager.onRawFrameReceived = { [weak self] envelope, data in
             self?.handleIncomingImage(envelope, data)
@@ -133,7 +135,7 @@ final class ClipboardSyncManager: ObservableObject {
     // MARK: - Inbound: wire -> local pasteboard
 
     /// A peer's `clipboard.text` slot changed (main queue).
-    func handleIncomingText(valueJSON: String) {
+    func handleIncomingText(valueJSON: String, from deviceId: String) {
         guard let text = try? guardLogic.incomingText(payloadJson: valueJSON) else { return }
 
         ClipboardHistoryStore.shared.record(text, remote: true)
@@ -145,6 +147,7 @@ final class ClipboardSyncManager: ObservableObject {
 
         // Record the resulting changeCount so our own poll doesn't treat this as a new local copy and echo it back.
         lastChangeCount = pasteboard.changeCount
+        onRemoteCopy?(deviceId, text, nil)
     }
 
     private func handleIncomingImage(_ envelope: Envelope, _ data: Data) {
@@ -157,6 +160,7 @@ final class ClipboardSyncManager: ObservableObject {
         pasteboard.setData(data, forType: .png)
 
         lastChangeCount = pasteboard.changeCount
+        onRemoteCopy?(envelope.payload["sourceDeviceId"]?.stringValue ?? envelope.senderId, nil, data)
     }
 
     // MARK: - Content policy (the core's, shared with every platform)

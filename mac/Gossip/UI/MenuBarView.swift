@@ -12,6 +12,7 @@ struct MenuBarView: View {
     let rosterGossipManager: RosterGossipManager
     @ObservedObject var bleProximityMonitor: BLEProximityMonitor
     @ObservedObject var hotspotStateManager: HotspotStateManager
+    @ObservedObject var instantHotspot: InstantHotspot
     @ObservedObject var ringManager: RingManager
     @ObservedObject var batterySyncManager: BatterySyncManager
     @ObservedObject var featureSettings: FeatureSettings
@@ -20,13 +21,6 @@ struct MenuBarView: View {
 
     @State private var settingsWindow: SettingsWindow?
     @State private var deviceSettingsWindow: DeviceSettingsWindow?
-    @State private var hotspotGattClients: [String: HotspotGattClient] = [:]
-    @State private var activeHotspotAutoConnect: HotspotAutoConnect?
-    /// The hotspot state the phone itself just confirmed over GATT. The BLE advertisement bit and the
-    /// mesh report both lag a real toggle by several seconds, so the icon trusts this until the
-    /// merged state catches up (or `hotspotOverrideLifetime` passes).
-    @State private var hotspotOverrides: [String: (enabled: Bool, at: Date)] = [:]
-    private static let hotspotOverrideLifetime: TimeInterval = 30
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -129,64 +123,6 @@ struct MenuBarView: View {
         .frame(width: 300)
     }
 
-    /// Merges the two hotspot-state sources: `hotspot.state_update`'s mesh report
-    /// (`HotspotStateManager`, richer — carries the SSID, works at any range) and the
-    /// BLE advertisement's own on/off bit (`BLEProximityMonitor.isHotspotOn`, live
-    /// even with no mesh connection at all). Live-confirmed real gap this fixes: with
-    /// mesh as the only source, this Mac's hotspot indicator went stale the moment its
-    /// mesh connection to the phone dropped, with nothing to correct it — pressing the
-    /// button against that stale belief then sent the wrong request. Prefers the BLE
-    /// bit's `enabled` value whenever the phone is currently BLE-nearby (fresher by
-    /// construction), keeping the mesh report's `ssid` either way; falls back to a
-    /// BLE-only or mesh-only state when just one source has data, and to `nil` when
-    /// neither does.
-    private func mergedHotspotState(for deviceId: String) -> HotspotState? {
-        let underlying = underlyingHotspotState(for: deviceId)
-        if let override = hotspotOverrides[deviceId], Date().timeIntervalSince(override.at) < Self.hotspotOverrideLifetime,
-           underlying?.enabled != override.enabled {
-            return HotspotState(enabled: override.enabled, ssid: override.enabled ? underlying?.ssid : nil)
-        }
-        return underlying
-    }
-
-    private func underlyingHotspotState(for deviceId: String) -> HotspotState? {
-        let meshState = hotspotStateManager.hotspotStateBySenderId[deviceId]
-        guard bleProximityMonitor.nearbyDeviceIds.contains(deviceId) else { return meshState }
-        let bleOn = bleProximityMonitor.isHotspotOn(deviceId: deviceId)
-        if let meshState {
-            return HotspotState(enabled: bleOn, ssid: meshState.ssid)
-        }
-        return HotspotState(enabled: bleOn, ssid: nil)
-    }
-
-    /// Requests `enable` from the phone over BLE GATT, then joins its network on a successful "on".
-    /// Deliberately silent in the UI — the hotspot icon's own state is the feedback — but failures
-    /// are written to the BLE debug log.
-    private func requestHotspot(for device: TrustedDevice, enable: Bool) {
-        guard let peripheralId = bleProximityMonitor.peripheralIdentifierByDeviceId[device.deviceId] else {
-            return
-        }
-        let client = HotspotGattClient()
-        hotspotGattClients[device.deviceId] = client
-        client.requestToggle(providerId: device.deviceId, peripheralIdentifier: peripheralId, enable: enable) { result in
-            DispatchQueue.main.async {
-                hotspotGattClients[device.deviceId] = nil
-                switch result {
-                case .failed(let reason):
-                    gossipError("Gossip: " + "requestHotspot failed: \(reason)")
-                case .success(let enabled, let ssid, let passphrase):
-                    hotspotOverrides[device.deviceId] = (enabled, Date())
-                    guard enable, enabled, let ssid, let passphrase else { return }
-                    let autoConnect = HotspotAutoConnect()
-                    activeHotspotAutoConnect = autoConnect
-                    autoConnect.connect(ssid: ssid, passphrase: passphrase) { connected in
-                        if !connected { NSLog("Gossip: " + "requestHotspot: could not auto-connect to \(ssid)") }
-                    }
-                }
-            }
-        }
-    }
-
     /// The row's actions, as compact icons: Ring, Mirror Screen, Instant Hotspot (tinted blue while on,
     /// as before), and "⋯" for per-device settings. A disabled feature's icon simply doesn't appear.
     @ViewBuilder
@@ -211,7 +147,7 @@ struct MenuBarView: View {
                         .help("Open an app from \(device.deviceName) in its own window")
                 }
             }
-            if featureSettings.isEnabled(.hotspot), device.deviceType == .androidPhone, let state = mergedHotspotState(for: device.deviceId) {
+            if featureSettings.isEnabled(.hotspot), device.deviceType == .androidPhone, let state = instantHotspot.state(for: device.deviceId) {
                 hotspotButton(for: device, state: state)
             }
             // Per-device settings open a plain NSWindow, not an inline control: a TextField inside
@@ -267,12 +203,12 @@ struct MenuBarView: View {
     /// requests the opposite of the currently known state.
     @ViewBuilder
     private func hotspotButton(for device: TrustedDevice, state: HotspotState) -> some View {
-        if hotspotGattClients[device.deviceId] != nil {
+        if instantHotspot.isRequesting(device.deviceId) {
             // Request in flight: a spinner, like the screen-mirroring button while it starts.
             ProgressView().controlSize(.small)
         } else {
             Button {
-                requestHotspot(for: device, enable: !state.enabled)
+                instantHotspot.request(device.deviceId, enable: !state.enabled)
             } label: {
                 // "personalhotspot.slash" isn't a real SF Symbol — off state is conveyed by tint alone.
                 Image(systemName: "personalhotspot")

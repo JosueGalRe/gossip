@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Darwin
+import GossipCoreKit
 import Security
 
 /// Local API for the Droppy droplet: newline-delimited JSON over a `0600` Unix socket in Gossip's Application Support
@@ -8,17 +9,21 @@ import Security
 /// notification content and messages and lets the client act on the phone.
 ///
 /// Server → client:
-/// - `state`: devices (online, through the relay or not, battery) and the peers this Mac is ringing, on connect and on
-///   every change.
+/// - `state`: devices (online, through the relay or not, battery, Do Not Disturb, hotspot) and the peers this Mac is
+///   ringing, on connect and on every change.
 /// - `notification.posted` / `notification.removed` as they arrive, plus every active one on connect with `replay: true`.
 /// - `media`: a device's now-playing state, or `nowPlaying: null` when it stopped. Artwork only when it changed.
 /// - `messages.threads`, `messages.history` (the open conversation) and `messages.status` while the client has Messages open.
 /// - `apps`: the phone's launchable apps (package, label, icon as base64 PNG) while the client has asked for them.
+/// - `clipboard`: a peer's clipboard just landed on this Mac (`deviceId`, `text` cut to 500 characters, or `image`, a
+///   small PNG thumbnail).
+/// - `hotspot.result` (`deviceId`, `ok`) after a `hotspot` request; `error` (`message`) when a mirror or app window fails.
 ///
 /// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `action` (`deviceId`, `id`, `index`), `ring` (`deviceId`),
 /// `open` (`target`: pair, mirror, messages), `media` (`action`, optional `seekMs`), `volume` (`direction`),
 /// `messages.open` / `messages.close`, `messages.thread` (`threadId`), `messages.send` (`phoneId`, `address`, `body`),
-/// `apps` (`deviceId`) and `apps.close`.
+/// `apps` (`deviceId`), `apps.close`, `app.open` (`deviceId`, `package`), `dnd` (`deviceId`, `enabled`) and `hotspot`
+/// (`deviceId`, `enabled`).
 ///
 /// All bookkeeping is on the main queue; each client gets a serial queue for its blocking writes.
 final class DroppyBridge {
@@ -53,6 +58,8 @@ final class DroppyBridge {
     private let media: MediaControlManager
     private let messages: MessagesManager
     private let screenMirror: ScreenMirrorController
+    private let hotspot: InstantHotspot
+    private let clipboard: ClipboardSyncManager
     private let trusted: TrustedDevicesStore
 
     private var listenFD: Int32 = -1
@@ -68,6 +75,8 @@ final class DroppyBridge {
     private var messagesOpen = false
     /// The phone whose app list the client is looking at (the droplet's settings), `nil` when none is.
     private var appsDeviceId: String?
+    /// Each peer's Do Not Disturb, from its `dnd.state` slot.
+    private var dnd: [String: Bool] = [:]
 
     /// Read from the transport's queue by `NotificationMirrorManager`, so it is kept apart from `clients`.
     private let clientCountLock = NSLock()
@@ -76,7 +85,7 @@ final class DroppyBridge {
 
     init(transport: TransportManager, battery: BatterySyncManager, notifications: NotificationMirrorManager,
          ring: RingManager, media: MediaControlManager, messages: MessagesManager, screenMirror: ScreenMirrorController,
-         trusted: TrustedDevicesStore = .shared) {
+         hotspot: InstantHotspot, clipboard: ClipboardSyncManager, trusted: TrustedDevicesStore = .shared) {
         self.transport = transport
         self.battery = battery
         self.notifications = notifications
@@ -84,6 +93,8 @@ final class DroppyBridge {
         self.media = media
         self.messages = messages
         self.screenMirror = screenMirror
+        self.hotspot = hotspot
+        self.clipboard = clipboard
         self.trusted = trusted
     }
 
@@ -98,8 +109,17 @@ final class DroppyBridge {
             DispatchQueue.main.async { self?.handleRemoved(envelope) }
         }
         transport.addOnStateChanged { [weak self] change in
-            guard change.slot == "notification.active" else { return }
-            self?.handleActive(deviceId: change.deviceId, valueJSON: change.valueJSON)
+            guard let self else { return }
+            if change.slot == "notification.active" {
+                handleActive(deviceId: change.deviceId, valueJSON: change.valueJSON)
+            } else if change.slot == GossipCoreKit.dndSlot() {
+                let value = change.valueJSON.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                dnd[change.deviceId] = value?["enabled"] as? Bool
+                broadcastState()
+            }
+        }
+        clipboard.onRemoteCopy = { [weak self] deviceId, text, png in
+            DispatchQueue.main.async { self?.broadcastClipboard(from: deviceId, text: text, png: png) }
         }
 
         // `@Published` fires before the new value is stored, so read it on the next main-queue turn.
@@ -127,6 +147,20 @@ final class DroppyBridge {
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in self?.broadcastThreads() }
         .store(in: &cancellables)
+
+        // The BLE monitor publishes on every advertisement; only an actual change of a phone's hotspot is news.
+        hotspot.objectWillChange
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .map { [weak self] in self?.hotspotStates() ?? [:] }
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.broadcastState() }
+            .store(in: &cancellables)
+
+        screenMirror.$lastError
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] message in self?.broadcast(["type": "error", "message": message]) }
+            .store(in: &cancellables)
 
         // Icons arrive in batches right after the list; one broadcast for the lot.
         Publishers.Merge3(
@@ -345,6 +379,24 @@ final class DroppyBridge {
             screenMirror.requestApps(deviceId: deviceId, transport: transport)
         case "apps.close":
             appsDeviceId = nil
+        case "app.open":
+            // A phone app as its own Mac window; one already open comes forward.
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let package = string("package", 200),
+                  let transport, let device = trusted.devices.first(where: { $0.deviceId == deviceId }) else { return }
+            let label = screenMirror.appsByDevice[deviceId]?.first { $0.package == package }?.label ?? package
+            let wasOpen = screenMirror.isAppOpen(package, on: deviceId)
+            screenMirror.start(deviceId: deviceId, deviceName: device.deviceName, transport: transport,
+                               app: .init(package: package, label: label))
+            if wasOpen { NSApp.activate(ignoringOtherApps: true) }
+        case "dnd":
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let enabled = object["enabled"] as? Bool else { return }
+            try? transport?.send(envelope: Envelope(type: "dnd.set", senderId: IdentityKeyStore.shared.deviceId,
+                                                    recipientId: deviceId, payload: .object(["enabled": .bool(enabled)])))
+        case "hotspot":
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let enabled = object["enabled"] as? Bool else { return }
+            hotspot.request(deviceId, enable: enabled) { [weak self] ok in
+                self?.broadcast(["type": "hotspot.result", "deviceId": deviceId, "ok": ok])
+            }
         default:
             break
         }
@@ -480,6 +532,40 @@ final class DroppyBridge {
 
     // MARK: - State
 
+    private func broadcastClipboard(from deviceId: String, text: String?, png: Data?) {
+        var message: [String: Any] = ["type": "clipboard", "deviceId": deviceId]
+        if let text { message["text"] = String(text.prefix(500)) }
+        if let png, let thumbnail = Self.thumbnail(png, maxSide: 240) { message["image"] = thumbnail.base64EncodedString() }
+        guard message.count > 2 else { return }
+        broadcast(message)
+    }
+
+    /// A PNG no larger than `maxSide` on its long edge, for a preview.
+    private static func thumbnail(_ png: Data, maxSide: CGFloat) -> Data? {
+        guard let image = NSImage(data: png), image.size.width > 0, image.size.height > 0 else { return nil }
+        let scale = min(1, maxSide / max(image.size.width, image.size.height))
+        let size = NSSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    /// Each phone's hotspot as the menu bar shows it: `"on"`, `"on <ssid>"` or `"off"`; phones with no reading left out.
+    private func hotspotStates() -> [String: String] {
+        guard FeatureSettings.shared.isEnabled(.hotspot) else { return [:] }
+        var states: [String: String] = [:]
+        for device in trusted.devices where device.deviceType == .androidPhone {
+            guard let state = hotspot.state(for: device.deviceId) else { continue }
+            states[device.deviceId] = state.enabled ? (state.ssid.map { "on \($0)" } ?? "on") : "off"
+        }
+        return states
+    }
+
     private func broadcastApps() {
         guard let deviceId = appsDeviceId, let apps = screenMirror.appsByDevice[deviceId] else {
             if let deviceId = appsDeviceId, let error = screenMirror.appsError[deviceId] {
@@ -507,6 +593,10 @@ final class DroppyBridge {
     private func stateMessage() -> [String: Any] {
         let online = transport?.connectedDeviceIds ?? []
         let relayed = transport?.relayedDeviceIds ?? []
+        let hotspots = FeatureSettings.shared.isEnabled(.hotspot)
+            ? Dictionary(uniqueKeysWithValues: trusted.devices.filter { $0.deviceType == .androidPhone }
+                .compactMap { device in hotspot.state(for: device.deviceId).map { (device.deviceId, $0) } })
+            : [:]
         let devices: [[String: Any]] = trusted.devices.map { device in
             var entry: [String: Any] = [
                 "id": device.deviceId,
@@ -517,6 +607,12 @@ final class DroppyBridge {
             ]
             if let state = battery.batteryBySenderId[device.deviceId] {
                 entry["battery"] = ["level": state.level, "charging": state.isCharging]
+            }
+            if let enabled = dnd[device.deviceId] { entry["dnd"] = enabled }
+            if let state = hotspots[device.deviceId] {
+                var value: [String: Any] = ["enabled": state.enabled]
+                if let ssid = state.ssid { value["ssid"] = ssid }
+                entry["hotspot"] = value
             }
             return entry
         }

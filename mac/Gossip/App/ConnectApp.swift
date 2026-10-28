@@ -19,6 +19,7 @@ struct ConnectApp: App {
     private let rosterGossipManager: RosterGossipManager
     @StateObject private var bleProximityMonitor: BLEProximityMonitor
     @StateObject private var hotspotStateManager: HotspotStateManager
+    @StateObject private var instantHotspot: InstantHotspot
     private let lockOnLeaveManager: LockOnLeaveManager
     /// Shares this Mac's BLE beacon key (a direct-only state slot) and stores peers'; held for its handlers.
     private let beaconKeyManager: BeaconKeyManager
@@ -69,7 +70,8 @@ struct ConnectApp: App {
         _notificationMirrorManager = StateObject(wrappedValue: notificationMirror)
         UNUserNotificationCenter.current().delegate = notificationMirror
         dndSyncManager = DNDSyncManager(transportManager: transport)
-        _clipboardSyncManager = StateObject(wrappedValue: ClipboardSyncManager(transportManager: transport))
+        let clipboardSync = ClipboardSyncManager(transportManager: transport)
+        _clipboardSyncManager = StateObject(wrappedValue: clipboardSync)
         rosterGossipManager = RosterGossipManager(transportManager: transport)
         beaconKeyManager = BeaconKeyManager(transportManager: transport)
         phoneInputManager = PhoneInputManager()
@@ -83,7 +85,10 @@ struct ConnectApp: App {
         messagesManager = MessagesManager(transport: transport, devices: TrustedDevicesStore.shared)
         let bleMonitor = BLEProximityMonitor(trustedDevicesStore: TrustedDevicesStore.shared)
         _bleProximityMonitor = StateObject(wrappedValue: bleMonitor)
-        _hotspotStateManager = StateObject(wrappedValue: HotspotStateManager(transportManager: transport))
+        let hotspotStates = HotspotStateManager(transportManager: transport)
+        _hotspotStateManager = StateObject(wrappedValue: hotspotStates)
+        let hotspot = InstantHotspot(states: hotspotStates, ble: bleMonitor)
+        _instantHotspot = StateObject(wrappedValue: hotspot)
         lockOnLeaveManager = LockOnLeaveManager(
             transportManager: transport,
             trustedDevicesStore: TrustedDevicesStore.shared,
@@ -96,7 +101,8 @@ struct ConnectApp: App {
         battery.start()
         UniversalControlCoordinator.shared.configure(transport: transport, trustedDevices: TrustedDevicesStore.shared, battery: battery)
         droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror,
-                                    ring: ring, media: mediaControl, messages: messagesManager, screenMirror: screenMirror)
+                                    ring: ring, media: mediaControl, messages: messagesManager, screenMirror: screenMirror,
+                                    hotspot: hotspot, clipboard: clipboardSync)
         droppyBridge.start()
         // While the droplet is connected it shows notifications and battery alerts; Gossip's own would be duplicates.
         notificationMirror.suppressesLocalBanners = { [droppyBridge] in droppyBridge.hasClients }
@@ -282,6 +288,7 @@ struct ConnectApp: App {
                 rosterGossipManager: rosterGossipManager,
                 bleProximityMonitor: bleProximityMonitor,
                 hotspotStateManager: hotspotStateManager,
+                instantHotspot: instantHotspot,
                 ringManager: ringManager,
                 batterySyncManager: batterySyncManager,
                 featureSettings: FeatureSettings.shared,

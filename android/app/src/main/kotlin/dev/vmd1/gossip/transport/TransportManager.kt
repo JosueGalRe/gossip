@@ -33,6 +33,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -186,8 +187,12 @@ class TransportManager(
      *  the metadata [Envelope] with the raw bytes so a feature manager (e.g.
      *  [dev.vmd1.gossip.features.clipboard.ClipboardSyncManager] for image sync) can
      *  consume both together. See `docs/wire-protocol.md`'s "Large binary payloads"
-     *  section. Single-subscriber, like [onUntrustedHandshake]/[onNewDevicePaired]. */
-    var onRawFrameReceived: ((Envelope, ByteArray) -> Unit)? = null
+     *  section. Each feature filters by envelope type so clipboard and file chunks can coexist. */
+    private val rawFrameHandlers = CopyOnWriteArrayList<(Envelope, ByteArray) -> Unit>()
+
+    fun addOnRawFrameReceived(handler: (Envelope, ByteArray) -> Unit) { rawFrameHandlers.addIfAbsent(handler) }
+
+    fun removeOnRawFrameReceived(handler: (Envelope, ByteArray) -> Unit) { rawFrameHandlers.remove(handler) }
 
     val discovery = NsdDiscovery(context, identityKeyStore.deviceId, identityKeyStore.publicKeyFingerprint())
 
@@ -335,7 +340,10 @@ class TransportManager(
             is CoreBridge.BridgeAction.Deliver -> {
                 _incoming.emit(event.envelope)
                 messageRouter.dispatch(event.envelope)
-                event.raw?.let { onRawFrameReceived?.invoke(event.envelope, it) }
+                event.raw?.let { raw ->
+                    for (handler in rawFrameHandlers) runCatching { handler(event.envelope, raw) }
+                        .onFailure { Log.w(TAG, "Raw frame handler failed: ${it.message}") }
+                }
             }
             is CoreBridge.BridgeAction.Heard -> {
                 val first = lastHeard.put(event.deviceId, System.currentTimeMillis()) == null
@@ -948,7 +956,7 @@ class TransportManager(
      *  skipped. Throws when there is nobody to send it to. */
     suspend fun send(unsigned: Envelope) = withContext(Dispatchers.IO) {
         if (!isMessageAllowed(unsigned.type)) return@withContext
-        sendThroughEngine { bridge.send(unsigned) }
+        sendThroughEngine { checkFileRecipient(unsigned); bridge.send(unsigned) }
     }
 
     /** Originates a `hasRawFollowup` envelope + its raw binary frame (e.g. clipboard image sync); the engine binds the
@@ -956,7 +964,16 @@ class TransportManager(
      *  relays, which forward the pair atomically. */
     suspend fun send(unsigned: Envelope, rawFollowup: ByteArray) = withContext(Dispatchers.IO) {
         if (!isMessageAllowed(unsigned.type)) return@withContext
-        sendThroughEngine { bridge.send(unsigned, rawFollowup) }
+        sendThroughEngine { checkFileRecipient(unsigned); bridge.send(unsigned, rawFollowup) }
+    }
+
+    /** Runs under the engine lock, so a dropped direct link cannot race a file onto a virtual relay connection. */
+    private fun checkFileRecipient(envelope: Envelope) {
+        if (!envelope.type.startsWith("file.")) return
+        val link = envelope.recipientId?.let { linkByDevice[it] }?.let { links[it] }
+        check(envelope.ttl == 0 && !envelope.broadcast && link != null && !link.closed) {
+            "File transfer requires a direct connection and ttl 0"
+        }
     }
 
     private fun sendThroughEngine(body: () -> List<CoreBridge.BridgeAction>) {

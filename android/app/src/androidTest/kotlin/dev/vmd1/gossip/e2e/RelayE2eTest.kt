@@ -152,7 +152,7 @@ class RelayE2eTest {
         })
         router.register("screen.", EnvelopeHandler { screenDelivered.incrementAndGet() })
         router.register("control.", EnvelopeHandler { screenDelivered.incrementAndGet() })
-        transport.onRawFrameReceived = { envelope, raw ->
+        transport.addOnRawFrameReceived { envelope, raw ->
             val digest = Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(raw), Base64.NO_WRAP)
             log("raw frame ${raw.size} bytes from ${envelope.senderId}")
             reply("e2e.rawhash", envelope.senderId, buildJsonObject {

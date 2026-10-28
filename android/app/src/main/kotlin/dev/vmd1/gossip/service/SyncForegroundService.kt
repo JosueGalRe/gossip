@@ -17,6 +17,7 @@ import dev.vmd1.gossip.crypto.IdentityKeyStore
 import dev.vmd1.gossip.crypto.TrustedDevicesStore
 import dev.vmd1.gossip.features.clipboard.ClipboardSyncManager
 import dev.vmd1.gossip.features.dnd.DndSyncManager
+import dev.vmd1.gossip.features.filetransfer.FileTransferManager
 import dev.vmd1.gossip.features.media.MediaControlBridge
 import dev.vmd1.gossip.features.notifications.NotificationMirrorReceiver
 import dev.vmd1.gossip.features.proximity.BLEProximityMonitor
@@ -53,6 +54,7 @@ class SyncForegroundService : Service() {
     lateinit var controlSessionState: dev.vmd1.gossip.features.universalcontrol.ControlSessionState
     private lateinit var mediaControlBridge: MediaControlBridge
     private lateinit var clipboardSyncManager: ClipboardSyncManager
+    private lateinit var fileTransferManager: FileTransferManager
     private lateinit var dndSyncManager: DndSyncManager
     private lateinit var rosterGossipManager: RosterGossipManager
     private lateinit var beaconKeyManager: dev.vmd1.gossip.features.proximity.BeaconKeyManager
@@ -187,6 +189,7 @@ class SyncForegroundService : Service() {
             identityKeyStore = identity
         )
         TransportManagerHolder.instance = transportManager
+        fileTransferManager = FileTransferManager(applicationContext, transportManager, trustedDevices, serviceScope)
         // The notification listener may have connected before the transport existed; let it register
         // its reply/dismiss handlers now.
         dev.vmd1.gossip.features.notifications.NotificationListenerImpl.active?.ensureHandlersRegistered()
@@ -617,8 +620,22 @@ class SyncForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
-        transportManager.listen()
-        mediaControlBridge.start()
+        when (intent?.action) {
+            ACTION_SEND_FILES -> {
+                val peer = intent.getStringExtra(EXTRA_DEVICE_ID)
+                val clip = intent.clipData
+                if (peer != null && clip != null) {
+                    val uris = (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+                        .filter { it.scheme == "content" }
+                    fileTransferManager.enqueue(peer, uris)
+                }
+            }
+            ACTION_CANCEL_FILE -> intent.getStringExtra(EXTRA_TRANSFER_ID)?.let(fileTransferManager::cancel)
+            else -> {
+                transportManager.listen()
+                mediaControlBridge.start()
+            }
+        }
         return START_STICKY
     }
 
@@ -652,6 +669,7 @@ class SyncForegroundService : Service() {
         mediaControlBridge.stop()
         dndSyncManager.stop()
         clipboardSyncManager.stop()
+        fileTransferManager.stop()
         bleProximityMonitor.stop()
         hotspotStateManager.stop()
         lockOnLeaveManager.stop()
@@ -754,6 +772,10 @@ class SyncForegroundService : Service() {
     }
 
     companion object {
+        const val ACTION_SEND_FILES = "dev.vmd1.gossip.SEND_FILES"
+        const val ACTION_CANCEL_FILE = "dev.vmd1.gossip.CANCEL_FILE"
+        const val EXTRA_DEVICE_ID = "deviceId"
+        const val EXTRA_TRANSFER_ID = "transferId"
         private const val CHANNEL_ID = "connect_sync"
         private const val ACTION_STOP_RING = "dev.vmd1.gossip.STOP_RING"
         private const val ACTION_STOP_REMOTE = "dev.vmd1.gossip.STOP_REMOTE"

@@ -134,7 +134,7 @@ class TransportE2eTest {
         // observable proof that the gate works end to end.
         router.register("dnd.", EnvelopeHandler { dnd.incrementAndGet() })
         router.register("clipboard.", EnvelopeHandler { clipboard.incrementAndGet() })
-        transport.onRawFrameReceived = { envelope, raw ->
+        transport.addOnRawFrameReceived { envelope, raw ->
             val digest = Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(raw), Base64.NO_WRAP)
             log("raw frame ${raw.size} bytes from ${envelope.senderId}")
             reply("e2e.rawhash", envelope.senderId, buildJsonObject {

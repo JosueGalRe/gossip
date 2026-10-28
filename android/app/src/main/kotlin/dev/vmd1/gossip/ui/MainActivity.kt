@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,22 +20,19 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.background
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
@@ -51,15 +49,11 @@ import dev.vmd1.gossip.onboarding.OnboardingPreferences
 import dev.vmd1.gossip.pairing.QRScanActivity
 import dev.vmd1.gossip.pairing.ShowQrActivity
 import dev.vmd1.gossip.protocol.DeviceType
-import dev.vmd1.gossip.protocol.Envelope
-import dev.vmd1.gossip.protocol.MessageType
 import dev.vmd1.gossip.protocol.detectDeviceType
 import dev.vmd1.gossip.service.SyncForegroundService
 import dev.vmd1.gossip.transport.ConnectionState
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 
 /**
  * Minimal launcher UI: connection status, a "Pair New Device" button, and the list of
@@ -119,6 +113,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The home screen's background runs under the status and navigation bars.
+        enableEdgeToEdge()
 
         if (!OnboardingPreferences(applicationContext).isCompleted) {
             startActivity(Intent(this, OnboardingActivity::class.java))
@@ -439,11 +435,15 @@ fun ConnectHomeScreen(
     // one-shot snapshot from whenever this screen first composed, so a newly-paired device
     // never appeared until the app was force-restarted.
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    var dndAccessGranted by remember { mutableStateOf(false) }
+    // Asked of the system, not the service: right after a launch the service may not be bound yet, and a false
+    // "no access" would put a warning on the home screen.
+    val notificationManager = androidx.compose.ui.platform.LocalContext.current.getSystemService(android.app.NotificationManager::class.java)
+    var dndAccessGranted by remember { mutableStateOf(notificationManager.isNotificationPolicyAccessGranted) }
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                dndAccessGranted = dndSyncManagerProvider()?.hasNotificationPolicyAccess() ?: false
+                dndAccessGranted = notificationManager.isNotificationPolicyAccessGranted
+                notificationAccessGranted = isNotificationAccessGranted()
                 devices = trustedDevicesStore.allDevices()
             }
         }
@@ -634,117 +634,72 @@ fun ConnectHomeScreen(
         return
     }
 
-    Scaffold { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            androidx.compose.foundation.layout.Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-            ) {
-                Text("Gossip", style = MaterialTheme.typography.headlineMedium)
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    androidx.compose.material3.IconButton(onClick = { settingsPage = SettingsPage.CLIPBOARD_HOME }) {
-                        androidx.compose.material3.Icon(
-                            Icons.Default.ContentPaste,
-                            contentDescription = "Clipboard history"
-                        )
-                    }
-                    androidx.compose.material3.IconButton(onClick = { settingsPage = SettingsPage.ROOT }) {
-                        androidx.compose.material3.Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Settings"
-                        )
-                    }
-                }
+    val nearbyDeviceIds by (nearbyDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
+    val hotspotStates by (hotspotStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, dev.vmd1.gossip.features.hotspot.HotspotState>()) })
+    val bleHotspotOnStates by (bleHotspotOnStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, Boolean>()) })
+    val ringingPeers by (ringingPeersProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
+    val directDeviceIds by (directDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
+    val meshDeviceIds by (meshDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
+    val relayedDeviceIds by (relayedDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
+    val batteryStates by (batteryStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, dev.vmd1.gossip.features.battery.BatteryState>()) })
+
+    // What keeps a feature from working, with its fix a tap away (the same checks as Settings → Permissions).
+    val warnings = buildList {
+        if (isPhone && !notificationAccessGranted) add(HomeWarning("Notifications aren't shared", "Allow notification access") {
+            onEnableNotificationAccess()
+            notificationAccessGranted = isNotificationAccessGranted()
+        })
+        if (!notificationPermissionGranted()) add(HomeWarning("Gossip can't notify you", "Mirrored notifications are dropped", onRequestNotificationPermission))
+        if (!dndAccessGranted) add(HomeWarning("Do Not Disturb can't follow your devices", "Allow Do Not Disturb access") {
+            dndSyncManagerProvider()?.let(onRequestDndAccess)
+        })
+        if (!bluetoothPermissionGranted()) add(HomeWarning("Nearby features are off", "Allow Bluetooth for Lock on leave and Hotspot", onRequestBluetoothPermission))
+        if (!isPhone && !deviceAdminActive()) add(HomeWarning("A phone can't lock this device", "Allow device admin for Lock on leave", onRequestDeviceAdmin))
+    }
+
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    GossipHome(
+        devices = devices,
+        connectionState = connectionState,
+        directDeviceIds = directDeviceIds,
+        meshDeviceIds = meshDeviceIds,
+        relayedDeviceIds = relayedDeviceIds,
+        nearbyDeviceIds = nearbyDeviceIds,
+        batteryStates = batteryStates,
+        ringingPeers = ringingPeers,
+        hotspotFor = { id -> mergedHotspotState(id, nearbyDeviceIds, bleHotspotOnStates, hotspotStates, hotspotOverrides) },
+        myDeviceType = myDeviceType,
+        warnings = warnings,
+        notificationAccessGranted = notificationAccessGranted,
+        onToggleRing = onToggleRing,
+        onTrackpad = { id, name -> dev.vmd1.gossip.features.peripheral.TrackpadActivity.start(toastContext, id, name) },
+        onMirror = { id, name -> dev.vmd1.gossip.features.screenmirror.ScreenViewerActivity.start(toastContext, id, name) },
+        onRequestHotspot = onRequestHotspot,
+        onOpen = { settingsPage = it },
+        onPairNewDevice = onPairNewDevice,
+        onForget = { deviceId ->
+            // Prefer the roster-gossip path (revokes locally *and* broadcasts
+            // `trust.revoke` so the rest of the mesh drops trust too) — falls
+            // back to a local-only revoke if the service isn't bound yet.
+            val roster = rosterGossipManagerProvider()
+            if (roster != null) {
+                roster.revoke(deviceId)
+            } else {
+                trustedDevicesStore.revoke(deviceId)
             }
-            ConnectionStatusCard(connectionState)
-
-            val nearbyDeviceIds by (nearbyDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
-            val hotspotStates by (hotspotStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, dev.vmd1.gossip.features.hotspot.HotspotState>()) })
-            val bleHotspotOnStates by (bleHotspotOnStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, Boolean>()) })
-            val ringingPeers by (ringingPeersProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
-            val directDeviceIds by (directDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
-            val meshDeviceIds by (meshDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
-            val relayedDeviceIds by (relayedDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
-            val batteryStates by (batteryStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, dev.vmd1.gossip.features.battery.BatteryState>()) })
-
-            val toastContext = androidx.compose.ui.platform.LocalContext.current
-            PairedDevicesScreen(
-                devices = devices,
-                nearbyDeviceIds = nearbyDeviceIds,
-                myDeviceType = myDeviceType,
-                onSetLockOnLeave = onSetLockOnLeave,
-                hotspotStates = hotspotStates,
-                bleHotspotOnStates = bleHotspotOnStates,
-                onRequestHotspot = onRequestHotspot,
-                hotspotOverrides = hotspotOverrides,
-                directDeviceIds = directDeviceIds,
-                meshDeviceIds = meshDeviceIds,
-                relayedDeviceIds = relayedDeviceIds,
-                batteryStates = batteryStates,
-                ringingPeers = ringingPeers,
-                onToggleRing = onToggleRing,
-                onTrackpad = { id, name -> dev.vmd1.gossip.features.peripheral.TrackpadActivity.start(toastContext, id, name) },
-                onMirror = { id, name -> dev.vmd1.gossip.features.screenmirror.ScreenViewerActivity.start(toastContext, id, name) },
-                onForget = { deviceId ->
-                    // Prefer the roster-gossip path (revokes locally *and* broadcasts
-                    // `trust.revoke` so the rest of the mesh drops trust too) — falls
-                    // back to a local-only revoke if the service isn't bound yet.
-                    val roster = rosterGossipManagerProvider()
-                    if (roster != null) {
-                        roster.revoke(deviceId)
-                    } else {
-                        trustedDevicesStore.revoke(deviceId)
-                    }
-                    devices = trustedDevicesStore.allDevices()
-                },
-                onSetFallbackHost = { deviceId, fallbackHost ->
-                    if (!trustedDevicesStore.setFallbackHost(deviceId, fallbackHost)) {
-                        android.widget.Toast.makeText(toastContext, "That isn't a valid IP address or hostname", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                    devices = trustedDevicesStore.allDevices()
-                }
-            )
-        }
-    }
-}
-
-/** Rounded status card: a coloured dot, a plain-language state and a one-line explanation. */
-@Composable
-private fun ConnectionStatusCard(state: ConnectionState) {
-    val (dot, title, detail) = when (state) {
-        ConnectionState.CONNECTED -> Triple(androidx.compose.ui.graphics.Color(0xFF34C759), "Connected", "Syncing with your paired devices")
-        ConnectionState.HANDSHAKING -> Triple(androidx.compose.ui.graphics.Color(0xFFFF9500), "Connecting…", "Securing the connection")
-        ConnectionState.DISCOVERING -> Triple(androidx.compose.ui.graphics.Color(0xFFFFCC00), "Searching…", "Looking for your paired devices")
-        ConnectionState.DISCONNECTED -> Triple(androidx.compose.ui.graphics.Color(0xFF8E8E93), "Disconnected", "Not connected to any device")
-    }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant
-    ) {
-        androidx.compose.foundation.layout.Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            androidx.compose.foundation.layout.Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .background(dot, androidx.compose.foundation.shape.CircleShape)
-            )
-            Column {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            devices = trustedDevicesStore.allDevices()
+        },
+        onSetFallbackHost = { deviceId, fallbackHost ->
+            if (!trustedDevicesStore.setFallbackHost(deviceId, fallbackHost)) {
+                android.widget.Toast.makeText(toastContext, "That isn't a valid IP address or hostname", android.widget.Toast.LENGTH_SHORT).show()
             }
+            devices = trustedDevicesStore.allDevices()
+        },
+        onSetLockOnLeave = { deviceId, enabled ->
+            onSetLockOnLeave(deviceId, enabled)
+            devices = trustedDevicesStore.allDevices()
         }
-    }
+    )
 }
 
 @Preview(showBackground = true)

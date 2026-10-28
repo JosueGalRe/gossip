@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Combine
 import Darwin
 import Security
@@ -13,10 +13,12 @@ import Security
 /// - `notification.posted` / `notification.removed` as they arrive, plus every active one on connect with `replay: true`.
 /// - `media`: a device's now-playing state, or `nowPlaying: null` when it stopped. Artwork only when it changed.
 /// - `messages.threads`, `messages.history` (the open conversation) and `messages.status` while the client has Messages open.
+/// - `apps`: the phone's launchable apps (package, label, icon as base64 PNG) while the client has asked for them.
 ///
 /// Client → server: `reply` / `dismiss` (`deviceId`, `id`), `action` (`deviceId`, `id`, `index`), `ring` (`deviceId`),
 /// `open` (`target`: pair, mirror, messages), `media` (`action`, optional `seekMs`), `volume` (`direction`),
-/// `messages.open` / `messages.close`, `messages.thread` (`threadId`) and `messages.send` (`phoneId`, `address`, `body`).
+/// `messages.open` / `messages.close`, `messages.thread` (`threadId`), `messages.send` (`phoneId`, `address`, `body`),
+/// `apps` (`deviceId`) and `apps.close`.
 ///
 /// All bookkeeping is on the main queue; each client gets a serial queue for its blocking writes.
 final class DroppyBridge {
@@ -50,6 +52,7 @@ final class DroppyBridge {
     private let ring: RingManager
     private let media: MediaControlManager
     private let messages: MessagesManager
+    private let screenMirror: ScreenMirrorController
     private let trusted: TrustedDevicesStore
 
     private var listenFD: Int32 = -1
@@ -63,6 +66,8 @@ final class DroppyBridge {
     private var sentArtwork: [String: Data] = [:]
     /// Whether the droplet has Messages open, so `MessagesManager` keeps refreshing on its behalf.
     private var messagesOpen = false
+    /// The phone whose app list the client is looking at (the droplet's settings), `nil` when none is.
+    private var appsDeviceId: String?
 
     /// Read from the transport's queue by `NotificationMirrorManager`, so it is kept apart from `clients`.
     private let clientCountLock = NSLock()
@@ -70,13 +75,15 @@ final class DroppyBridge {
     var hasClients: Bool { clientCountLock.withLock { clientCount > 0 } }
 
     init(transport: TransportManager, battery: BatterySyncManager, notifications: NotificationMirrorManager,
-         ring: RingManager, media: MediaControlManager, messages: MessagesManager, trusted: TrustedDevicesStore = .shared) {
+         ring: RingManager, media: MediaControlManager, messages: MessagesManager, screenMirror: ScreenMirrorController,
+         trusted: TrustedDevicesStore = .shared) {
         self.transport = transport
         self.battery = battery
         self.notifications = notifications
         self.ring = ring
         self.media = media
         self.messages = messages
+        self.screenMirror = screenMirror
         self.trusted = trusted
     }
 
@@ -119,6 +126,16 @@ final class DroppyBridge {
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in self?.broadcastThreads() }
+        .store(in: &cancellables)
+
+        // Icons arrive in batches right after the list; one broadcast for the lot.
+        Publishers.Merge3(
+            screenMirror.$appsByDevice.map { _ in () },
+            screenMirror.$iconsByDevice.map { _ in () },
+            screenMirror.$appsError.map { _ in () }
+        )
+        .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+        .sink { [weak self] in self?.broadcastApps() }
         .store(in: &cancellables)
 
         Publishers.CombineLatest(messages.$messages, messages.$openThreadId)
@@ -244,6 +261,7 @@ final class DroppyBridge {
             messagesOpen = false
             messages.close()
         }
+        if clients.isEmpty { appsDeviceId = nil }
     }
 
     private func send(_ message: [String: Any], to client: Client) {
@@ -319,6 +337,14 @@ final class DroppyBridge {
             guard let phoneId = string("phoneId", 200), isTrusted(phoneId), let address = string("address", 64),
                   let body = string("body", 2000) else { return }
             messages.send(body: body, to: address, via: phoneId)
+        case "apps":
+            // What Gossip already has right away, then the phone's fresh list and any new icons.
+            guard let deviceId = string("deviceId", 200), isTrusted(deviceId), let transport else { return }
+            appsDeviceId = deviceId
+            broadcastApps()
+            screenMirror.requestApps(deviceId: deviceId, transport: transport)
+        case "apps.close":
+            appsDeviceId = nil
         default:
             break
         }
@@ -453,6 +479,25 @@ final class DroppyBridge {
     }
 
     // MARK: - State
+
+    private func broadcastApps() {
+        guard let deviceId = appsDeviceId, let apps = screenMirror.appsByDevice[deviceId] else {
+            if let deviceId = appsDeviceId, let error = screenMirror.appsError[deviceId] {
+                broadcast(["type": "apps", "deviceId": deviceId, "apps": [], "error": error])
+            }
+            return
+        }
+        let icons = screenMirror.iconsByDevice[deviceId] ?? [:]
+        let list: [[String: Any]] = apps.map { app in
+            var entry: [String: Any] = ["package": app.package, "label": app.label]
+            if let tiff = icons[app.package]?.tiffRepresentation,
+               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                entry["icon"] = png.base64EncodedString()
+            }
+            return entry
+        }
+        broadcast(["type": "apps", "deviceId": deviceId, "apps": list])
+    }
 
     private func broadcastState() {
         guard !clients.isEmpty else { return }

@@ -96,7 +96,7 @@ struct ConnectApp: App {
         battery.start()
         UniversalControlCoordinator.shared.configure(transport: transport, trustedDevices: TrustedDevicesStore.shared, battery: battery)
         droppyBridge = DroppyBridge(transport: transport, battery: battery, notifications: notificationMirror,
-                                    ring: ring, media: mediaControl, messages: messagesManager)
+                                    ring: ring, media: mediaControl, messages: messagesManager, screenMirror: screenMirror)
         droppyBridge.start()
         // While the droplet is connected it shows notifications and battery alerts; Gossip's own would be duplicates.
         notificationMirror.suppressesLocalBanners = { [droppyBridge] in droppyBridge.hasClients }

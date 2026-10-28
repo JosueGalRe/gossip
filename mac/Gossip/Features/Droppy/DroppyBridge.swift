@@ -8,7 +8,8 @@ import Security
 /// notification content and messages and lets the client act on the phone.
 ///
 /// Server → client:
-/// - `state`: devices (online, battery) and the peers this Mac is ringing, on connect and on every change.
+/// - `state`: devices (online, through the relay or not, battery) and the peers this Mac is ringing, on connect and on
+///   every change.
 /// - `notification.posted` / `notification.removed` as they arrive, plus every active one on connect with `replay: true`.
 /// - `media`: a device's now-playing state, or `nowPlaying: null` when it stopped. Artwork only when it changed.
 /// - `messages.threads`, `messages.history` (the open conversation) and `messages.status` while the client has Messages open.
@@ -95,8 +96,9 @@ final class DroppyBridge {
         }
 
         // `@Published` fires before the new value is stored, so read it on the next main-queue turn.
-        Publishers.Merge4(
+        Publishers.Merge5(
             transport.$connectedDeviceIds.map { _ in () },
+            transport.$relayedDeviceIds.map { _ in () },
             battery.$batteryBySenderId.map { _ in () },
             trusted.$devices.map { _ in () },
             ring.$ringingPeers.map { _ in () }
@@ -459,12 +461,14 @@ final class DroppyBridge {
 
     private func stateMessage() -> [String: Any] {
         let online = transport?.connectedDeviceIds ?? []
+        let relayed = transport?.relayedDeviceIds ?? []
         let devices: [[String: Any]] = trusted.devices.map { device in
             var entry: [String: Any] = [
                 "id": device.deviceId,
                 "name": device.deviceName,
                 "type": device.deviceType.rawValue,
-                "online": online.contains(device.deviceId),
+                "online": online.contains(device.deviceId) || relayed.contains(device.deviceId),
+                "relayed": relayed.contains(device.deviceId),
             ]
             if let state = battery.batteryBySenderId[device.deviceId] {
                 entry["battery"] = ["level": state.level, "charging": state.isCharging]

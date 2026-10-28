@@ -84,7 +84,6 @@ class ClipboardSyncManager(
     private var lastObservedText: String? = null
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { onLocalClipChanged() }
-    private val rawFrameHandler: (Envelope, ByteArray) -> Unit = ::onRemoteImageUpdate
 
     @Volatile
     private var started = false
@@ -106,7 +105,7 @@ class ClipboardSyncManager(
             }
         }
         ClipboardPolicy.pruneCache(File(context.cacheDir, "clipboard")) // leftovers from earlier runs
-        transportManager.addOnRawFrameReceived(rawFrameHandler)
+        transportManager.onRawFrameReceived = { envelope, data -> onRemoteImageUpdate(envelope, data) }
         if (shizukuManager != null) {
             pollJob = scope.launch { runBackgroundPollLoop() }
         }
@@ -120,7 +119,7 @@ class ClipboardSyncManager(
         clipboardManager.removePrimaryClipChangedListener(clipListener)
         stateJob?.cancel()
         stateJob = null
-        transportManager.removeOnRawFrameReceived(rawFrameHandler)
+        transportManager.onRawFrameReceived = null
         pollJob?.cancel()
         pollJob = null
     }

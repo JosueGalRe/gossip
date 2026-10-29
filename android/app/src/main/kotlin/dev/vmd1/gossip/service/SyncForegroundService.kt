@@ -68,6 +68,7 @@ class SyncForegroundService : Service() {
     private lateinit var ringManager: dev.vmd1.gossip.features.find.RingManager
     private lateinit var displayInfoSync: dev.vmd1.gossip.features.universalcontrol.DisplayInfoSync
     private lateinit var batterySyncManager: dev.vmd1.gossip.features.battery.BatterySyncManager
+    private val tailnet by lazy { dev.vmd1.gossip.features.tailnet.TailnetAddresses(applicationContext) }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onCreate() {
@@ -500,6 +501,7 @@ class SyncForegroundService : Service() {
             }
             .launchIn(serviceScope)
 
+        tailnet.start(serviceScope, transportManager::setState, transportManager.stateChanges)
         runFallbackDialLoop(trustedDevices)
     }
 
@@ -605,8 +607,9 @@ class SyncForegroundService : Service() {
                 delay(FALLBACK_DIAL_INTERVAL_MS)
                 val connected = transportManager.connectedDeviceIds.value
                 for (target in trustedDevices.allDevices()) {
-                    val host = target.fallbackHost
-                    if (host.isNullOrBlank() || target.deviceId in connected) continue
+                    // One typed in wins; else the tailnet address the device published (Tailscale, set up by itself).
+                    val host = target.fallbackHost?.takeIf { it.isNotBlank() } ?: tailnet.hostFor(target.deviceId)
+                    if (host == null || target.deviceId in connected) continue
                     transportManager.connect(
                         host = host,
                         port = TransportManager.DEFAULT_PORT,

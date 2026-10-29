@@ -255,11 +255,14 @@ struct ConnectApp: App {
         // idle. With a mesh, this Mac may already be connected to some
         // trusted devices while still needing to fallback-dial others.
         let trustedDevices = trustedDevicesStore
+        let tailnet = TailnetAddresses(transport: transport)
         fallbackDialSubscriptions.cancellable = Timer.publish(every: 15, on: .main, in: .common)
             .autoconnect()
-            .sink { [transport, trustedDevices] _ in
+            .sink { [transport, trustedDevices, tailnet] _ in
                 for target in trustedDevices.allDevices() {
-                    guard let host = target.fallbackHost, !host.isEmpty else { continue }
+                    // One typed in wins; else the tailnet address the device published (Tailscale, set up by itself).
+                    guard let host = target.fallbackHost.flatMap({ $0.isEmpty ? nil : $0 }) ?? tailnet.host(for: target.deviceId)
+                    else { continue }
                     guard !transport.connectedDeviceIds.contains(target.deviceId) else { continue }
                     guard let keyData = Data(base64Encoded: target.publicKeyBase64),
                           let staticKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: keyData)

@@ -7,10 +7,12 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 
 /** Restarts [SyncForegroundService] after the device reboots, so sync resumes without
- *  the user needing to open the app. */
+ *  the user needing to open the app (unless it was paused, see [GossipControl]). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        // A paused Gossip stays paused across a reboot.
+        if (GossipControl.getInstance(context).isPaused) return
         val serviceIntent = Intent(context, SyncForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ContextCompat.startForegroundService(context, serviceIntent)

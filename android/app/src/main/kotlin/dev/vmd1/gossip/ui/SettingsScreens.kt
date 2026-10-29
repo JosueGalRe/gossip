@@ -338,3 +338,51 @@ fun ColumnScope.MessagesSettingsContent() {
         Text("Ready. Open Messages from the Gossip menu on your Mac.", style = MaterialTheme.typography.bodyMedium)
     }
 }
+
+/** One thing Gossip needs from Android: what it is for, and whether it's allowed or the way to allow it. */
+data class PermissionItem(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val title: String,
+    val detail: String,
+    val granted: Boolean,
+    val actionLabel: String = "Enable",
+    /** `null` when there is nothing to do from here (say, Shizuku not installed). */
+    val onEnable: (() -> Unit)?
+)
+
+/** Settings → Permissions as a checklist: every item with its state, the missing ones with their button. */
+@Composable
+fun ColumnScope.PermissionChecklist(items: List<PermissionItem>) {
+    val missing = items.count { !it.granted }
+    Text(
+        if (missing == 0) "Everything Gossip needs is allowed." else "$missing ${if (missing == 1) "thing" else "things"} to allow.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Column {
+            items.forEachIndexed { index, item ->
+                if (index > 0) androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        item.icon,
+                        contentDescription = null,
+                        tint = if (item.granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+                        Text(item.title, style = MaterialTheme.typography.titleSmall)
+                        Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    when {
+                        item.granted -> Text("Allowed", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        item.onEnable != null -> androidx.compose.material3.FilledTonalButton(onClick = item.onEnable) { Text(item.actionLabel) }
+                        else -> Text("Unavailable", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}

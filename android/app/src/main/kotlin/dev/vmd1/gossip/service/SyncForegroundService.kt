@@ -39,6 +39,8 @@ import kotlinx.coroutines.isActive
 import dev.vmd1.gossip.protocol.Envelope
 import dev.vmd1.gossip.protocol.MessageType
 import kotlinx.coroutines.launch
+import dev.vmd1.gossip.protocol.DeviceType
+import android.app.PendingIntent
 
 /**
  * Foreground service that owns the [TransportManager] for the lifetime of the app,
@@ -326,6 +328,7 @@ class SyncForegroundService : Service() {
             isEnabled = { featureSettings.isEnabled(dev.vmd1.gossip.features.settings.Feature.BATTERY) }
         )
         batterySyncManager.start()
+        publishStatus()
 
         // Display size, so the Mac's Universal Control layout draws this device at its real shape before any session
         // exists. A state slot: the core keeps it correct, and it is republished when the display rotates.
@@ -617,9 +620,76 @@ class SyncForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
+        val control = GossipControl.getInstance(applicationContext)
+        when (intent?.action) {
+            ACTION_PAUSE -> {
+                control.pause()
+                return START_NOT_STICKY
+            }
+            ACTION_RESUME -> control.markResumed()
+            ACTION_RING -> {
+                intent.getStringExtra(EXTRA_DEVICE_ID)?.takeIf { TrustedDevicesStore.getInstance(this).isTrusted(it) }
+                    ?.let(ringManager::toggleRing)
+                // Already running: ringing is all this start was for.
+                if (started) return START_STICKY
+            }
+        }
+        // Paused, and started by something that didn't know (a sticky restart, an old shortcut): stay off.
+        if (control.isPaused) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        started = true
         transportManager.listen()
         mediaControlBridge.start()
         return START_STICKY
+    }
+
+    /** Whether [onStartCommand] brought the transport up; until then the status notification isn't this service's. */
+    private var started = false
+
+    /** Publishes what Gossip is doing (the paired device it shows, how it is reached, its battery) for the status
+     *  notification, the Quick Settings tile, the widget and the home screen, as it changes. */
+    private fun publishStatus() {
+        val control = GossipControl.getInstance(applicationContext)
+        val trusted = TrustedDevicesStore.getInstance(applicationContext)
+        serviceScope.launch {
+            kotlinx.coroutines.flow.combine(
+                transportManager.connectionState,
+                transportManager.connectedDeviceIds,
+                transportManager.relayedDeviceIds,
+                transportManager.meshReachableDeviceIds,
+                batterySyncManager.batteryBySenderId
+            ) { state, direct, relayed, mesh, batteries ->
+                val devices = trusted.allDevices()
+                fun reach(id: String) = dev.vmd1.gossip.transport.DeviceConnectivity.classify(id, direct, mesh, relayed)
+                val none = dev.vmd1.gossip.transport.Connectivity.NONE
+                // The same device the home screen shows: a connected Mac, else any connected device, else the first.
+                val device = devices.firstOrNull { it.deviceType == DeviceType.MAC && reach(it.deviceId) != none }
+                    ?: devices.firstOrNull { reach(it.deviceId) != none }
+                    ?: devices.firstOrNull { it.deviceType == DeviceType.MAC }
+                    ?: devices.firstOrNull()
+                GossipStatus(
+                    deviceId = device?.deviceId,
+                    deviceName = device?.deviceName,
+                    deviceType = device?.deviceType,
+                    reach = device?.let { reach(it.deviceId) } ?: none,
+                    battery = device?.let { batteries[it.deviceId] },
+                    searching = state == ConnectionState.DISCOVERING || state == ConnectionState.HANDSHAKING
+                )
+            }.collect { status ->
+                if (control.isPaused) return@collect
+                control.publish(status)
+                refreshNotification()
+            }
+        }
+        serviceScope.launch { control.quiet.collect { refreshNotification() } }
+    }
+
+    private fun refreshNotification() {
+        if (!started) return
+        runCatching { getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification()) }
     }
 
     /**
@@ -729,32 +799,61 @@ class SyncForegroundService : Service() {
 
     private val binder = LocalBinder()
 
+    /** The ongoing notification says what Gossip is doing ("Connected to MacBook · Local network · 82%"), opens the
+     *  app and pauses it. Quiet, it sits on a minimum-importance channel: out of the status bar, collapsed in the shade. */
     private fun buildNotification(): Notification {
-        val channelId = ensureChannel()
-        return NotificationCompat.Builder(this, channelId)
-            .setContentTitle(getString(R.string.sync_notification_title))
-            .setContentText(getString(R.string.sync_notification_text))
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+        val control = GossipControl.getInstance(applicationContext)
+        val status = control.status.value
+        val quiet = control.quiet.value
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, dev.vmd1.gossip.ui.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        val pause = PendingIntent.getService(
+            this, 2, Intent(this, SyncForegroundService::class.java).setAction(ACTION_PAUSE), PendingIntent.FLAG_IMMUTABLE
+        )
+        val name = status.deviceName
+        return NotificationCompat.Builder(this, ensureChannel(quiet))
+            .setContentTitle(
+                when {
+                    name == null -> getString(R.string.sync_notification_title)
+                    status.connected -> "Connected to $name"
+                    else -> name
+                }
+            )
+            .setContentText(if (name == null) getString(R.string.sync_notification_text) else status.summary)
+            .setSmallIcon(R.drawable.ic_tile_gossip)
+            .setPriority(if (quiet) NotificationCompat.PRIORITY_MIN else NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setContentIntent(open)
+            .addAction(0, "Pause", pause)
             .build()
     }
 
-    private fun ensureChannel(): String {
+    private fun ensureChannel(quiet: Boolean): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.sync_notification_channel),
-                NotificationManager.IMPORTANCE_LOW
+            manager.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, getString(R.string.sync_notification_channel), NotificationManager.IMPORTANCE_LOW)
             )
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(
+                NotificationChannel(QUIET_CHANNEL_ID, "Gossip status (quiet)", NotificationManager.IMPORTANCE_MIN)
+            )
         }
-        return CHANNEL_ID
+        return if (quiet) QUIET_CHANNEL_ID else CHANNEL_ID
     }
 
     companion object {
+        /** Pause Gossip (the status notification's action). */
+        const val ACTION_PAUSE = "dev.vmd1.gossip.PAUSE"
+        /** Resume a paused Gossip (the widget's button while paused): starting the service is the resume. */
+        const val ACTION_RESUME = "dev.vmd1.gossip.RESUME"
+        /** Ring [EXTRA_DEVICE_ID], or stop ringing it (the widget's button). */
+        const val ACTION_RING = "dev.vmd1.gossip.RING"
+        const val EXTRA_DEVICE_ID = "deviceId"
         private const val CHANNEL_ID = "connect_sync"
+        private const val QUIET_CHANNEL_ID = "connect_sync_quiet"
         private const val ACTION_STOP_RING = "dev.vmd1.gossip.STOP_RING"
         private const val ACTION_STOP_REMOTE = "dev.vmd1.gossip.STOP_REMOTE"
         private const val REMOTE_CHANNEL_ID = "remote_access"

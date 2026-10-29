@@ -42,7 +42,6 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Warning
@@ -104,6 +103,14 @@ import dev.vmd1.gossip.transport.DeviceConnectivity
 import dev.vmd1.gossip.ui.theme.Accent
 import dev.vmd1.gossip.ui.theme.ThemeSettings
 import kotlinx.coroutines.launch
+import dev.vmd1.gossip.service.GossipTileService
+import dev.vmd1.gossip.R
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.CheckCircle
+import android.os.Build
+import android.content.ComponentName
+import android.app.StatusBarManager
 
 /** Something to fix for a feature to work, shown at the top of the home sheet with its fix one tap away. */
 data class HomeWarning(val title: String, val detail: String, val onFix: () -> Unit)
@@ -126,6 +133,10 @@ fun GossipHome(
     ringingPeers: Set<String>,
     hotspotFor: (deviceId: String) -> HotspotState?,
     myDeviceType: DeviceType,
+    paused: Boolean,
+    onTogglePause: () -> Unit,
+    quietNotification: Boolean,
+    onSetQuietNotification: (Boolean) -> Unit,
     warnings: List<HomeWarning>,
     notificationAccessGranted: Boolean,
     onToggleRing: (deviceId: String) -> Unit,
@@ -174,19 +185,23 @@ fun GossipHome(
                 warnings = warnings,
                 isPhone = isPhone,
                 notificationAccessGranted = notificationAccessGranted,
+                quietNotification = quietNotification,
+                onSetQuietNotification = onSetQuietNotification,
                 onOpen = onOpen
             )
         }
     ) {
         Box(Modifier.fillMaxSize().atmosphere(accent)) {
             Column(Modifier.fillMaxSize().statusBarsPadding().padding(bottom = peek)) {
-                TopBar(onSettings = { onOpen(SettingsPage.ROOT) })
+                TopBar(paused = paused, onTogglePause = onTogglePause)
                 if (devices.size > 1) {
                     DeviceChips(devices, selected = hero?.deviceId, onPick = { pickedId = it })
                 }
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     if (hero == null) {
                         EmptyHero(onPairNewDevice)
+                    } else if (paused) {
+                        PausedHero(hero, onResume = onTogglePause)
                     } else {
                         val reach = connectivity(hero.deviceId)
                         val ringing = hero.deviceId in ringingPeers
@@ -242,8 +257,9 @@ fun GossipHome(
 
 // MARK: - Hero
 
+/** Gossip's name and version, and its power button: pauses everything (connections, Bluetooth, sharing) or resumes. */
 @Composable
-private fun TopBar(onSettings: () -> Unit) {
+private fun TopBar(paused: Boolean, onTogglePause: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -253,14 +269,19 @@ private fun TopBar(onSettings: () -> Unit) {
             Text(BuildConfig.VERSION_NAME, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
         }
         Surface(
-            onClick = onSettings,
+            onClick = onTogglePause,
             shape = CircleShape,
-            color = Color.Transparent,
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+            color = if (paused) Color.Transparent else Color.White.copy(alpha = 0.12f),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = if (paused) 0.25f else 0.45f)),
             modifier = Modifier.size(40.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(
+                    Icons.Default.PowerSettingsNew,
+                    contentDescription = if (paused) "Resume Gossip" else "Pause Gossip",
+                    tint = Color.White.copy(alpha = if (paused) 0.55f else 1f),
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
     }
@@ -357,6 +378,33 @@ private fun HeroAction(icon: ImageVector, label: String, accent: Color, active: 
     }
 }
 
+/** Gossip paused: the device dimmed, and the way back. */
+@Composable
+private fun PausedHero(device: TrustedDevice, onResume: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(device.deviceType.icon, contentDescription = null, tint = Color.White.copy(alpha = 0.45f), modifier = Modifier.size(56.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(device.deviceName, style = MaterialTheme.typography.headlineSmall, color = Color.White.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        Surface(shape = RoundedCornerShape(50), color = Color.White.copy(alpha = 0.12f)) {
+            Text(
+                "Paused · nothing is shared",
+                style = MaterialTheme.typography.labelLarge,
+                color = Color.White.copy(alpha = 0.8f),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+        Spacer(Modifier.height(28.dp))
+        Button(
+            onClick = onResume,
+            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF111522))
+        ) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+            Text("  Resume")
+        }
+    }
+}
+
 @Composable
 private fun EmptyHero(onPairNewDevice: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -421,6 +469,8 @@ private fun HomeSheet(
     warnings: List<HomeWarning>,
     isPhone: Boolean,
     notificationAccessGranted: Boolean,
+    quietNotification: Boolean,
+    onSetQuietNotification: (Boolean) -> Unit,
     onOpen: (SettingsPage) -> Unit
 ) {
     Column(
@@ -432,7 +482,7 @@ private fun HomeSheet(
             .navigationBarsPadding(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        warnings.forEach { WarningRow(it) }
+        if (warnings.isEmpty()) AllSetRow { onOpen(SettingsPage.PERMISSIONS) } else warnings.forEach { WarningRow(it) }
         FeatureTiles(isPhone, notificationAccessGranted, onOpen)
         SectionLabel("Settings")
         SettingsMenuRow("Devices & pairing", "Pair a device, show your QR code, run setup again") { onOpen(SettingsPage.DEVICES) }
@@ -440,6 +490,8 @@ private fun HomeSheet(
         SettingsMenuRow("Permissions", "Notifications, Do Not Disturb, Bluetooth and more") { onOpen(SettingsPage.PERMISSIONS) }
         SettingsMenuRow("All features", "Every switch, with clipboard history") { onOpen(SettingsPage.FEATURES) }
         ThemeRow()
+        SwitchRow("Quiet notification", "Keep Gossip's status out of the status bar", quietNotification, onSetQuietNotification)
+        AddTileRow()
     }
 }
 
@@ -451,6 +503,51 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 4.dp, top = 6.dp)
     )
+}
+
+/** Nothing to fix: says so, and leads to the checklist. */
+@Composable
+private fun AllSetRow(onClick: () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val background = if (dark) Color(0xFF13301E) else Color(0xFFDDF5E4)
+    val foreground = if (dark) Color(0xFF8FE0A8) else Color(0xFF14532D)
+    Surface(onClick = onClick, shape = RoundedCornerShape(16.dp), color = background, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = foreground)
+            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("Everything is allowed", style = MaterialTheme.typography.titleSmall, color = foreground)
+                Text("Every feature has the access it needs", style = MaterialTheme.typography.bodySmall, color = foreground.copy(alpha = 0.8f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SwitchRow(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = checked, onCheckedChange = onChecked)
+        }
+    }
+}
+
+/** Android 13+: asks System UI to add the Quick Settings tile, the way the system's own add-tile prompt does. */
+@Composable
+private fun AddTileRow() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val context = LocalContext.current
+    SettingsMenuRow("Quick Settings tile", "Pause or resume Gossip from the quick settings") {
+        context.getSystemService(StatusBarManager::class.java)?.requestAddTileService(
+            ComponentName(context, GossipTileService::class.java),
+            "Gossip",
+            android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_tile_gossip),
+            context.mainExecutor
+        ) { }
+    }
 }
 
 @Composable

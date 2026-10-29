@@ -201,6 +201,33 @@
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!-- Quick Settings tile: the paired device's status; tap pauses or resumes Gossip. Listens only when asked. -->
+        <service
+            android:name=".service.GossipTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_gossip"
+            android:label="Gossip"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+        </service>
+
+        <!-- Home screen widget: the paired device, its status and Ring. -->
+        <receiver
+            android:name=".ui.GossipWidget"
+            android:exported="true"
+            android:label="Gossip">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_gossip_info" />
+        </receiver>
     </application>
 
 </manifest>

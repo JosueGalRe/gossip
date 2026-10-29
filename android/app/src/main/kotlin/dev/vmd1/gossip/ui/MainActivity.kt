@@ -54,6 +54,15 @@ import dev.vmd1.gossip.service.SyncForegroundService
 import dev.vmd1.gossip.transport.ConnectionState
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.DoNotDisturbOn
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.Icons
 
 /**
  * Minimal launcher UI: connection status, a "Pair New Device" button, and the list of
@@ -73,6 +82,8 @@ class MainActivity : ComponentActivity() {
      *  transport connected. Compose state fixes it at the source. */
     private var boundService by androidx.compose.runtime.mutableStateOf<SyncForegroundService?>(null)
     private var serviceConnection: ServiceConnection? = null
+    private var serviceBound = false
+    private val gossipControl by lazy { dev.vmd1.gossip.service.GossipControl.getInstance(applicationContext) }
 
     private val requestNotificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -123,11 +134,6 @@ class MainActivity : ComponentActivity() {
         }
 
         val serviceIntent = Intent(this, SyncForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
@@ -172,7 +178,20 @@ class MainActivity : ComponentActivity() {
             }
         }
         serviceConnection = connection
-        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+        // Running unless paused (from here, the notification, the tile or the widget): a bound service can't stop, so
+        // a pause also lets go of it here, and a resume starts and binds it again.
+        lifecycleScope.launch {
+            gossipControl.status.map { it.paused }.distinctUntilChanged().collect { paused ->
+                if (paused) {
+                    if (serviceBound) runCatching { unbindService(connection) }
+                    serviceBound = false
+                    boundService = null
+                } else {
+                    runCatching { androidx.core.content.ContextCompat.startForegroundService(this@MainActivity, serviceIntent) }
+                    if (!serviceBound) serviceBound = bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+                }
+            }
+        }
 
         val trustedDevicesStore = TrustedDevicesStore.getInstance(applicationContext)
         val myDeviceType = detectDeviceType(applicationContext)
@@ -183,6 +202,9 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ConnectHomeScreen(
                         connectionStateProvider = { boundService?.transportManager()?.connectionState },
+                        gossipControl = gossipControl,
+                        shizukuStateProvider = { boundService?.shizukuManager()?.state },
+                        onRequestShizuku = { boundService?.shizukuManager()?.requestPermission() },
                         trustedDevicesStore = trustedDevicesStore,
                         onPairNewDevice = {
                             startActivity(Intent(this@MainActivity, QRScanActivity::class.java))
@@ -266,7 +288,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        serviceConnection?.let { runCatching { unbindService(it) } }
+        if (serviceBound) serviceConnection?.let { runCatching { unbindService(it) } }
         activeHotspotConnection?.let { dev.vmd1.gossip.features.hotspot.HotspotAutoConnect.disconnect(this, it) }
         super.onDestroy()
     }
@@ -387,6 +409,9 @@ fun isDeviceAdminActive(context: Context): Boolean {
 @Composable
 fun ConnectHomeScreen(
     connectionStateProvider: () -> kotlinx.coroutines.flow.StateFlow<ConnectionState>?,
+    gossipControl: dev.vmd1.gossip.service.GossipControl? = null,
+    shizukuStateProvider: () -> kotlinx.coroutines.flow.StateFlow<dev.vmd1.gossip.features.hotspot.ShizukuManager.State>? = { null },
+    onRequestShizuku: () -> Unit = {},
     trustedDevicesStore: TrustedDevicesStore,
     onPairNewDevice: () -> Unit,
     onShowQrToPair: () -> Unit = {},
@@ -455,6 +480,36 @@ fun ConnectHomeScreen(
     // place of the home screen. `null` = the home screen; Back steps up one level (see SettingsPage.parent).
     var settingsPage by remember { mutableStateOf<SettingsPage?>(null) }
     val isPhone = myDeviceType == DeviceType.ANDROID_PHONE
+    val shizuku = shizukuStateProvider()?.collectAsState()?.value
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val openShizuku = {
+        context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")?.let(context::startActivity) ?: Unit
+    }
+    // Everything Gossip asks Android for, for the checklist (Settings → Permissions) and the home screen's warnings.
+    val permissionItems = buildList {
+        if (isPhone) add(PermissionItem(Icons.Default.Notifications, "Notification access", "Share this phone's notifications with your devices", notificationAccessGranted) {
+            onEnableNotificationAccess()
+            notificationAccessGranted = isNotificationAccessGranted()
+        })
+        add(PermissionItem(Icons.Default.NotificationsActive, "Show notifications", "Your devices' notifications, rings and alerts", notificationPermissionGranted(), onEnable = onRequestNotificationPermission))
+        add(PermissionItem(Icons.Default.DoNotDisturbOn, "Do Not Disturb", "Keep Do Not Disturb in sync with your devices", dndAccessGranted) {
+            dndSyncManagerProvider()?.let(onRequestDndAccess)
+        })
+        add(PermissionItem(Icons.Default.Bluetooth, "Nearby devices", "Lock on leave and Instant Hotspot", bluetoothPermissionGranted(), onEnable = onRequestBluetoothPermission))
+        if (!isPhone) add(PermissionItem(Icons.Default.AdminPanelSettings, "Device admin", "Let a paired phone lock this device", deviceAdminActive(), onEnable = onRequestDeviceAdmin))
+        if (shizuku != null) add(
+            PermissionItem(
+                Icons.Default.Terminal, "Shizuku", "Clipboard in the background, screen mirroring, Universal Control",
+                shizuku == dev.vmd1.gossip.features.hotspot.ShizukuManager.State.CONNECTED,
+                actionLabel = if (shizuku == dev.vmd1.gossip.features.hotspot.ShizukuManager.State.NOT_RUNNING) "Start" else "Allow",
+                onEnable = when (shizuku) {
+                    dev.vmd1.gossip.features.hotspot.ShizukuManager.State.NOT_RUNNING -> openShizuku
+                    dev.vmd1.gossip.features.hotspot.ShizukuManager.State.NOT_CONNECTED -> onRequestShizuku
+                    else -> null
+                }
+            )
+        )
+    }
     settingsPage?.let { page ->
         androidx.activity.compose.BackHandler { settingsPage = page.parent }
         val featureSettings = dev.vmd1.gossip.features.settings.FeatureSettings.getInstance(androidx.compose.ui.platform.LocalContext.current)
@@ -575,60 +630,7 @@ fun ConnectHomeScreen(
             }
 
             SettingsPage.PERMISSIONS -> SettingsPageScaffold("Permissions", onBack = { settingsPage = page.parent }) {
-                val needsDeviceAdmin = !isPhone && !deviceAdminActive()
-                if (notificationPermissionGranted() && dndAccessGranted && bluetoothPermissionGranted() && !needsDeviceAdmin) {
-                    Text("All permissions are granted.", style = MaterialTheme.typography.bodyMedium)
-                }
-                if (!notificationPermissionGranted()) {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.errorContainer
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                "Notifications permission is off — a paired device's mirrored " +
-                                    "notifications will be silently dropped, with no error shown " +
-                                    "anywhere.",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Button(onClick = onRequestNotificationPermission) {
-                                Text("Grant Notifications Permission")
-                            }
-                        }
-                    }
-                }
-                if (!dndAccessGranted) {
-                    Text(
-                        "To sync Do Not Disturb with your paired devices, Gossip needs notification " +
-                            "policy access.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Button(onClick = { dndSyncManagerProvider()?.let(onRequestDndAccess) }) {
-                        Text("Grant DND Access")
-                    }
-                }
-                if (!bluetoothPermissionGranted()) {
-                    Text(
-                        "To detect nearby trusted devices over Bluetooth (for features like " +
-                            "locking a paired Mac or tablet when your phone leaves range), Gossip needs " +
-                            "Bluetooth permission.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Button(onClick = onRequestBluetoothPermission) { Text("Grant Bluetooth Permission") }
-                }
-                if (needsDeviceAdmin) {
-                    Text(
-                        "To let a paired phone lock this device when it leaves Bluetooth range " +
-                            "(Lock-on-Leave), Gossip needs device admin access.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Button(onClick = onRequestDeviceAdmin) { Text("Grant Device Admin") }
-                }
+                PermissionChecklist(permissionItems)
             }
         }
         return
@@ -643,6 +645,9 @@ fun ConnectHomeScreen(
     val relayedDeviceIds by (relayedDeviceIdsProvider()?.collectAsState() ?: remember { mutableStateOf(emptySet<String>()) })
     val batteryStates by (batteryStatesProvider()?.collectAsState() ?: remember { mutableStateOf(emptyMap<String, dev.vmd1.gossip.features.battery.BatteryState>()) })
 
+    val gossipStatus by (gossipControl?.status?.collectAsState() ?: remember { mutableStateOf(dev.vmd1.gossip.service.GossipStatus()) })
+    val quiet by (gossipControl?.quiet?.collectAsState() ?: remember { mutableStateOf(false) })
+
     // What keeps a feature from working, with its fix a tap away (the same checks as Settings → Permissions).
     val warnings = buildList {
         if (isPhone && !notificationAccessGranted) add(HomeWarning("Notifications aren't shared", "Allow notification access") {
@@ -655,6 +660,14 @@ fun ConnectHomeScreen(
         })
         if (!bluetoothPermissionGranted()) add(HomeWarning("Nearby features are off", "Allow Bluetooth for Lock on leave and Hotspot", onRequestBluetoothPermission))
         if (!isPhone && !deviceAdminActive()) add(HomeWarning("A phone can't lock this device", "Allow device admin for Lock on leave", onRequestDeviceAdmin))
+        // Installed but stopped (it doesn't survive a reboot): the phone's clipboard, mirroring and Universal Control stop with it.
+        when (shizuku) {
+            dev.vmd1.gossip.features.hotspot.ShizukuManager.State.NOT_RUNNING ->
+                add(HomeWarning("Shizuku isn't running", "Copying on the phone won't reach your Mac", openShizuku))
+            dev.vmd1.gossip.features.hotspot.ShizukuManager.State.NOT_CONNECTED ->
+                add(HomeWarning("Shizuku needs your OK", "Allow Gossip in Shizuku", onRequestShizuku))
+            else -> Unit
+        }
     }
 
     val toastContext = androidx.compose.ui.platform.LocalContext.current
@@ -669,6 +682,10 @@ fun ConnectHomeScreen(
         ringingPeers = ringingPeers,
         hotspotFor = { id -> mergedHotspotState(id, nearbyDeviceIds, bleHotspotOnStates, hotspotStates, hotspotOverrides) },
         myDeviceType = myDeviceType,
+        paused = gossipStatus.paused,
+        onTogglePause = { gossipControl?.let { if (it.isPaused) it.resume() else it.pause() } },
+        quietNotification = quiet,
+        onSetQuietNotification = { gossipControl?.setQuiet(it) },
         warnings = warnings,
         notificationAccessGranted = notificationAccessGranted,
         onToggleRing = onToggleRing,

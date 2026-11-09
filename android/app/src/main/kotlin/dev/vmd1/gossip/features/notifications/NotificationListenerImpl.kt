@@ -27,8 +27,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
@@ -60,6 +58,10 @@ class NotificationListenerImpl : NotificationListenerService() {
     private data class ReplyTarget(val pendingIntent: PendingIntent, val remoteInputs: Array<RemoteInput>)
 
     private val replyTargets = ConcurrentHashMap<String, ReplyTarget>()
+
+    /** `notification.action` attempts already acted on: pressing a button twice (a duplicate delivery) can archive or
+     *  answer twice. */
+    private val recentActionAttempts = RecentAttempts()
     private var scope: CoroutineScope? = null
 
     /** Acts on each `notification.reply` attempt once. A duplicate delivery (retry, relay race, mesh dedupe-cache eviction —
@@ -109,12 +111,6 @@ class NotificationListenerImpl : NotificationListenerService() {
 
     /** Ongoing notifications update far more often than anyone reads them; see [LiveThrottle]. */
     private val liveThrottle = LiveThrottle()
-
-    /** `notification.action` attempts already acted on: pressing a button twice (a duplicate delivery) can archive or
-     *  answer twice. Bounded. */
-    private val actionAttempts = object : LinkedHashMap<String, Boolean>(32, 0.75f, false) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?) = size > 64
-    }
     private var registeredRouter: MessageRouter? = null
 
     /**
@@ -173,7 +169,7 @@ class NotificationListenerImpl : NotificationListenerService() {
             ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT))?.toString().orEmpty()
 
         val live = NotificationRichContent.live(notification)
-        if (live != null && !liveThrottle.shouldSend(id, System.currentTimeMillis(), "$title\n$body", live.progress, live.progressMax)) return
+        if (live != null && !liveThrottle.shouldSend(id, System.currentTimeMillis(), "$title\n$body", live.progress, live.max)) return
 
         val replyAction = findReplyAction(notification)
         if (replyAction != null) {
@@ -275,21 +271,25 @@ class NotificationListenerImpl : NotificationListenerService() {
         cancelNotification(dismiss.id)
     }
 
-    // MARK: - notification.action (mac -> android)
+    // MARK: - notification.action (any device -> android)
 
     /** Presses one of the notification's own buttons ("Mark as read", "Archive", "Answer"), found again by its key among
      *  the notifications still showing, so a button of one that is gone does nothing. Buttons that want typed input go
-     *  through `notification.reply` instead. */
+     *  through `notification.reply` instead. On Android 14+ the press may open an activity (answering a call does). */
     private fun handleAction(payload: JsonObject) {
-        val id = (payload["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: return
-        val index = (payload["index"] as? kotlinx.serialization.json.JsonPrimitive)?.intOrNull ?: return
-        val attempt = (payload["attemptId"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: return
-        synchronized(actionAttempts) {
-            if (actionAttempts.containsKey(attempt)) return
-            actionAttempts[attempt] = true
+        val request = try {
+            NotificationActionPayload.fromPayload(payload)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to decode notification.action payload", e)
+            return
         }
-        val sbn = runCatching { activeNotifications?.firstOrNull { it.key == id } }.getOrNull() ?: return
-        val action = sbn.notification.actions?.getOrNull(index) ?: return
+        // A duplicate delivery must not press the button twice (it can answer a call or archive a message).
+        if (!recentActionAttempts.firstTime(request.attemptId)) {
+            Log.i(TAG, "Dropping a duplicate notification.action")
+            return
+        }
+        val sbn = runCatching { activeNotifications?.firstOrNull { it.key == request.id } }.getOrNull() ?: return
+        val action = sbn.notification.actions?.getOrNull(request.index) ?: return
         if (!action.remoteInputs.isNullOrEmpty()) return
         try {
             val options = if (android.os.Build.VERSION.SDK_INT >= 34) {
@@ -299,7 +299,7 @@ class NotificationListenerImpl : NotificationListenerService() {
             } else null
             action.actionIntent?.send(applicationContext, 0, null, null, null, null, options)
         } catch (e: PendingIntent.CanceledException) {
-            Log.w(TAG, "Action ${action.title} of $id was canceled", e)
+            Log.w(TAG, "Action ${action.title} of ${request.id} was canceled", e)
         }
     }
 

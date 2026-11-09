@@ -19,6 +19,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -34,8 +36,11 @@ object MediaMessageType {
     /** The synchronised state slot a phone keeps its now-playing state in. */
     const val NOWPLAYING_SLOT = "media.nowplaying"
     const val COMMAND = "media.command"
-    /** Mac -> phone: one volume step of the music stream (`direction`: up or down, `commandId`). */
+    /** Mac -> phone: the music stream's volume, an absolute `level` or one `direction` step (see `handleVolume`). */
     const val VOLUME = "media.volume"
+
+    /** The music-stream volume index for a 0-100 [level] on a stream whose maximum index is [max]. */
+    fun volumeIndex(level: Int, max: Int): Int = Math.round(level.coerceIn(0, 100) / 100f * max).coerceIn(0, max)
 }
 
 /** Lets the notification listener tell [MediaControlBridge] that notification access is now available, so the bridge never
@@ -185,9 +190,18 @@ class MediaControlBridge(
         accepted.seekMs?.let { controls.seekTo(it) }
     }
 
+    /** `media.volume`, one of two forms. An absolute `level` (0-100): setting a value is idempotent, so a duplicate or a
+     *  periodic repeat ends in the same state and needs no dedupe key. Or one step, `direction` up or down: not idempotent,
+     *  so each `commandId` is acted on once. */
     private fun handleVolume(envelope: Envelope) {
         if (envelope.type != MediaMessageType.VOLUME) return
         val payload = envelope.payload
+        (payload["level"] as? JsonPrimitive)?.intOrNull?.let { level ->
+            val index = MediaMessageType.volumeIndex(level, audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC))
+            runCatching { audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, index, 0) }
+                .onFailure { Log.w(TAG, "setStreamVolume failed: ${it.message}") }
+            return
+        }
         val commandId = (payload["commandId"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return
         val direction = when ((payload["direction"] as? kotlinx.serialization.json.JsonPrimitive)?.content) {
             "up" -> android.media.AudioManager.ADJUST_RAISE

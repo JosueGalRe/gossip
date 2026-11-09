@@ -457,8 +457,8 @@ final class DroppyBridge {
             ]
             if let category = live.category { entry["category"] = category }
             if let progress = live.progress { entry["progress"] = progress }
-            if let max = live.progressMax { entry["progressMax"] = max }
-            if let base = live.chronometerBaseMs { entry["chronometerBaseMs"] = base }
+            if let max = live.max { entry["progressMax"] = max }
+            if let base = live.chronometerBase { entry["chronometerBaseMs"] = base }
             message["live"] = entry
         }
         return message

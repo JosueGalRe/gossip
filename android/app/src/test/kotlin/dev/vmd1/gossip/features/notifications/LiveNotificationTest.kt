@@ -8,16 +8,24 @@ import org.junit.Test
 
 class LiveNotificationTest {
     @Test fun `calls, timers, progress and Live Updates qualify`() {
-        assertTrue(NotificationLiveInfo.qualifies(false, Notification.CATEGORY_CALL, 0, false, false))
-        assertTrue(NotificationLiveInfo.qualifies(false, null, 100, false, false))
-        assertTrue(NotificationLiveInfo.qualifies(false, null, 0, true, false))
-        assertTrue(NotificationLiveInfo.qualifies(false, null, 0, false, true))
-        assertTrue(NotificationLiveInfo.qualifies(true, null, 0, false, false))
+        assertTrue(NotificationRichContent.qualifies(false, Notification.CATEGORY_CALL, 0, false, false))
+        assertTrue(NotificationRichContent.qualifies(false, null, 100, false, false))
+        assertTrue(NotificationRichContent.qualifies(false, null, 0, true, false))
+        assertTrue(NotificationRichContent.qualifies(false, null, 0, false, true))
+        assertTrue(NotificationRichContent.qualifies(true, null, 0, false, false))
     }
 
     @Test fun `a plain persistent notification does not`() {
-        assertFalse(NotificationLiveInfo.qualifies(false, Notification.CATEGORY_SERVICE, 0, false, false))
-        assertFalse(NotificationLiveInfo.qualifies(false, null, 0, false, false))
+        assertFalse(NotificationRichContent.qualifies(false, Notification.CATEGORY_SERVICE, 0, false, false))
+        assertFalse(NotificationRichContent.qualifies(false, null, 0, false, false))
+    }
+
+    @Test fun `kind is one every receiver draws, else ongoing`() {
+        assertEquals("call", NotificationRichContent.liveKind(Notification.CATEGORY_CALL, 0, false, true))
+        assertEquals("progress", NotificationRichContent.liveKind(null, 100, false, false))
+        assertEquals("progress", NotificationRichContent.liveKind(null, 0, true, false))
+        assertEquals("timer", NotificationRichContent.liveKind(Notification.CATEGORY_STOPWATCH, 0, false, true))
+        assertEquals("ongoing", NotificationRichContent.liveKind(Notification.CATEGORY_NAVIGATION, 0, false, false))
     }
 
     @Test fun `throttle sends changes and drops repeats within the interval`() {

@@ -19,6 +19,28 @@ import kotlinx.serialization.json.jsonObject
  *  re-mirrored. */
 const val EXTRA_IS_MIRROR = "dev.vmd1.gossip.app.isMirroredNotification"
 
+/** A button on the source notification (not its reply action), pressed from another device with `notification.action`. */
+@Serializable
+data class NotificationActionInfo(val index: Int, val title: String)
+
+/** A live notification (progress, timer, call): what receivers draw instead of static text. */
+@Serializable
+data class NotificationLive(
+    /** `"progress"`, `"timer"` or `"call"`; `"ongoing"` for the other live ones (navigation, alarm, a Live Update). */
+    val kind: String,
+    val progress: Int? = null,
+    val max: Int? = null,
+    val indeterminate: Boolean? = null,
+    /** Epoch ms the chronometer counts from, for `timer` and `call`. */
+    val chronometerBase: Long? = null,
+    /** The source's `Notification.category` (`call`, `navigation`, `alarm`, `stopwatch`, `progress`, …). */
+    val category: String? = null,
+    /** The chronometer counts down to [chronometerBase]. */
+    val countDown: Boolean? = null,
+    /** Android 16's Live Updates (`FLAG_PROMOTED_ONGOING`). */
+    val promoted: Boolean? = null
+)
+
 /** `notification.posted` payload (android -> mac). See `schema/message-types.md`. */
 @Serializable
 data class NotificationPostedPayload(
@@ -30,16 +52,17 @@ data class NotificationPostedPayload(
     val iconBase64: String? = null,
     val hasReplyAction: Boolean,
     val timestamp: Long,
-    /** The sender's photo: the last message's person icon, else the notification's large icon. */
+    /** The sender's photo, 96x96 PNG: the last message's person icon, else the notification's large icon. Optional; older
+     *  peers ignore it. */
     val avatarBase64: String? = null,
-    /** An attached image (BigPicture, or the last message's image when the listener may read it), downscaled. */
+    /** An attached image (BigPicture, or the last message's image when the listener may read it), JPEG downscaled. */
     val pictureBase64: String? = null,
-    /** The notification's own buttons that need no typed input, by their index in `Notification.actions`. */
+    /** The notification's own buttons that need no typed input, at most [MAX_ACTIONS], by their index in `Notification.actions`. */
     val actions: List<NotificationActionInfo>? = null,
-    /** Suggested one-tap replies: the app's own choices, then the system's smart replies. */
+    /** Suggested one-tap replies, at most [MAX_SMART_REPLIES]: the app's own choices, then the system's smart replies. */
     val smartReplies: List<String>? = null,
     /** Set for an ongoing notification worth following live: a call, a timer, a delivery or download in progress. */
-    val live: NotificationLiveInfo? = null
+    val live: NotificationLive? = null
 ) {
     /** Broadcast (not targeted): every other trusted device in the mesh — Macs *and*
      *  other Android devices (phones/tablets) — should mirror this notification, not
@@ -52,37 +75,10 @@ data class NotificationPostedPayload(
     )
 
     companion object {
-        private val json = Json { encodeDefaults = true }
-    }
-}
-
-@Serializable
-data class NotificationActionInfo(val index: Int, val title: String)
-
-@Serializable
-data class NotificationLiveInfo(
-    val category: String? = null,
-    val progress: Int? = null,
-    val progressMax: Int? = null,
-    val indeterminate: Boolean = false,
-    /** `Notification.when` when the notification shows a chronometer counting from (or down to) it. */
-    val chronometerBaseMs: Long? = null,
-    val countDown: Boolean = false,
-    /** Android 16's Live Updates (`FLAG_PROMOTED_ONGOING`). */
-    val promoted: Boolean = false
-) {
-    companion object {
-        private val liveCategories = setOf(
-            android.app.Notification.CATEGORY_CALL, android.app.Notification.CATEGORY_NAVIGATION,
-            android.app.Notification.CATEGORY_STOPWATCH, android.app.Notification.CATEGORY_ALARM,
-            android.app.Notification.CATEGORY_PROGRESS
-        )
-
-        /** Whether a notification is worth following live, from its plain facts (kept free of Android objects for tests):
-         *  promoted, showing progress or a chronometer, or a call/navigation/stopwatch/alarm. Plain persistent ones
-         *  ("VPN on", "Shizuku running") are none of these, so they stay out. */
-        fun qualifies(promoted: Boolean, category: String?, progressMax: Int, indeterminate: Boolean, chronometer: Boolean): Boolean =
-            promoted || progressMax > 0 || indeterminate || chronometer || category in liveCategories
+        private val json = Json { encodeDefaults = true; explicitNulls = false }
+        const val MAX_ACTIONS = 3
+        const val MAX_SMART_REPLIES = 3
+        const val MAX_PICTURE_BASE64_CHARS = 400_000
     }
 }
 
@@ -148,5 +144,33 @@ data class NotificationDismissPayload(val id: String) {
 
         fun fromPayload(payload: JsonObject): NotificationDismissPayload =
             json.decodeFromJsonElement(serializer(), payload)
+    }
+}
+
+/** `notification.action` payload (any device -> the phone that posted the notification, targeted): press the button at
+ *  [index] of the source notification's actions. [attemptId] (a UUID per press) is the de-duplication key, because
+ *  pressing a button can have effects outside the app (answer a call, archive an email), so a duplicate delivery must
+ *  not press it twice. */
+@Serializable
+data class NotificationActionPayload(val id: String, val index: Int, val attemptId: String) {
+    companion object {
+        private val json = Json { ignoreUnknownKeys = true }
+
+        fun fromPayload(payload: JsonObject): NotificationActionPayload =
+            json.decodeFromJsonElement(serializer(), payload)
+    }
+}
+
+/** Remembers the last [limit] attempt ids so a repeated one is acted on once: a bounded recently-handled cache, the same
+ *  pattern as `media.command`'s `commandId` and `notification.reply`'s `attemptId`. */
+class RecentAttempts(private val limit: Int = 128) {
+    private val seen = LinkedHashSet<String>()
+
+    /** `true` the first time [attemptId] is offered, `false` for every repeat. */
+    @Synchronized
+    fun firstTime(attemptId: String): Boolean {
+        if (!seen.add(attemptId)) return false
+        while (seen.size > limit) seen.remove(seen.first())
+        return true
     }
 }

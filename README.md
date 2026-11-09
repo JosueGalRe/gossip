@@ -16,7 +16,8 @@ Direct on your local network, optionally relayed (end-to-end encrypted) when you
 
 [**Download**](https://github.com/vmd1/gossip/releases/latest) · [Website](https://gossip.vmd1.dev) · [Getting started](docs/getting-started.md) · [FAQ](docs/faq.md) · [Roadmap](ROADMAP.md)
 
-<img src="site/hero.svg" alt="A Mac, an Android tablet and an Android phone linked together, with an optional relay for when you are away" width="720">
+<a href="site/video/gossip.mp4"><img src="site/video/gossip.gif" alt="Demo: a phone notification appears on the Mac and is answered inline, then the Mac's cursor moves onto the phone and turns on a setting" width="720"></a>
+<br><sub>Watch with sound: <a href="site/video/gossip.mp4">gossip.mp4</a></sub>
 
 </div>
 
@@ -60,7 +61,7 @@ Every feature has its own per-device switch in Settings. How this compares with 
 
 ## Install
 
-**Requirements:** macOS 14+ (the prebuilt app is Apple Silicon only) · Android 10+ · both devices on the same network to pair.
+**Requirements:** macOS 14+ (Apple Silicon and Intel; Intel is untested) · Android 10+ · both devices on the same network to pair.
 
 <table>
 <tr>
@@ -68,7 +69,7 @@ Every feature has its own per-device switch in Settings. How this compares with 
 
 **1. Mac**
 
-Download `Gossip-Mac-AppleSilicon.zip` from the [latest release](https://github.com/vmd1/gossip/releases/latest), unzip, and move `Gossip.app` to `/Applications`.
+Download `Gossip-Mac.zip` from the [latest release](https://github.com/vmd1/gossip/releases/latest), unzip, and move `Gossip.app` to `/Applications`. Or with Homebrew: `brew install --cask vmd1/apps/gossip` (it also clears the quarantine flag, so there is no "Open Anyway" step).
 
 The app isn't notarized: on first launch choose **System Settings → Privacy & Security → Open Anyway**.
 

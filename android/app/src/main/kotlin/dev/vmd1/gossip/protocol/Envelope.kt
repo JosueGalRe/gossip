@@ -89,7 +89,6 @@ object MessageType {
     const val NOTIFICATION_REMOVED = "notification.removed"
     const val NOTIFICATION_REPLY = "notification.reply"
     const val NOTIFICATION_DISMISS = "notification.dismiss"
-    /** Mac -> phone: press one of a notification's own buttons (`id`, `index`, `attemptId`). */
     const val NOTIFICATION_ACTION = "notification.action"
     const val DND_SET = "dnd.set"
     const val CLIPBOARD_UPDATE = "clipboard.update"

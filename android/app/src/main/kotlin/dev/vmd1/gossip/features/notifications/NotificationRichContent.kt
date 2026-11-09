@@ -17,8 +17,8 @@ import java.io.ByteArrayOutputStream
 private const val TAG = "NotificationRich"
 private const val AVATAR_PX = 96
 private const val PICTURE_MAX_PX = 480
-private const val MAX_ACTIONS = 3
-private const val MAX_SMART_REPLIES = 3
+private const val MAX_ACTIONS = NotificationPostedPayload.MAX_ACTIONS
+private const val MAX_SMART_REPLIES = NotificationPostedPayload.MAX_SMART_REPLIES
 
 /**
  * The parts of a notification beyond its text that the Mac shows: the sender's photo, an attached image, the app's own
@@ -48,6 +48,7 @@ object NotificationRichContent {
             ?: messageImage(context, notification)
             ?: return null
         return encode(scaledToFit(bitmap, PICTURE_MAX_PX), Bitmap.CompressFormat.JPEG, 70)
+            ?.takeIf { it.length <= NotificationPostedPayload.MAX_PICTURE_BASE64_CHARS }
     }
 
     private fun messageImage(context: Context, notification: Notification): Bitmap? {
@@ -79,8 +80,27 @@ object NotificationRichContent {
             .take(MAX_SMART_REPLIES).takeIf { it.isNotEmpty() }
     }
 
+    private val liveCategories = setOf(
+        Notification.CATEGORY_CALL, Notification.CATEGORY_NAVIGATION, Notification.CATEGORY_STOPWATCH,
+        Notification.CATEGORY_ALARM, Notification.CATEGORY_PROGRESS
+    )
+
+    /** Whether a notification is worth following live, from its plain facts (kept free of Android objects for tests):
+     *  promoted, showing progress or a chronometer, or a call/navigation/stopwatch/alarm. Plain persistent ones
+     *  ("VPN on", "Shizuku running") are none of these, so they stay out. */
+    fun qualifies(promoted: Boolean, category: String?, progressMax: Int, indeterminate: Boolean, chronometer: Boolean): Boolean =
+        promoted || progressMax > 0 || indeterminate || chronometer || category in liveCategories
+
+    /** `live.kind` for a qualifying notification: the three kinds every receiver draws, else `ongoing`. */
+    fun liveKind(category: String?, progressMax: Int, indeterminate: Boolean, chronometer: Boolean): String = when {
+        category == Notification.CATEGORY_CALL -> "call"
+        progressMax > 0 || indeterminate -> "progress"
+        chronometer -> "timer"
+        else -> "ongoing"
+    }
+
     /** The live state of an ongoing (or progress) notification, or `null` when it is not one to follow. */
-    fun live(notification: Notification): NotificationLiveInfo? {
+    fun live(notification: Notification): NotificationLive? {
         val extras = notification.extras
         val promoted = Build.VERSION.SDK_INT >= 36 && notification.flags and Notification.FLAG_PROMOTED_ONGOING != 0
         val progressMax = extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0)
@@ -88,15 +108,16 @@ object NotificationRichContent {
         val chronometer = extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER, false)
         val ongoing = notification.flags and Notification.FLAG_ONGOING_EVENT != 0
         if (!ongoing && progressMax <= 0) return null
-        if (!NotificationLiveInfo.qualifies(promoted, notification.category, progressMax, indeterminate, chronometer)) return null
-        return NotificationLiveInfo(
-            category = notification.category,
+        if (!qualifies(promoted, notification.category, progressMax, indeterminate, chronometer)) return null
+        return NotificationLive(
+            kind = liveKind(notification.category, progressMax, indeterminate, chronometer),
             progress = extras.getInt(Notification.EXTRA_PROGRESS, 0).takeIf { progressMax > 0 },
-            progressMax = progressMax.takeIf { it > 0 },
-            indeterminate = indeterminate,
-            chronometerBaseMs = notification.`when`.takeIf { chronometer && it > 0 },
-            countDown = extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN, false),
-            promoted = promoted
+            max = progressMax.takeIf { it > 0 },
+            indeterminate = indeterminate.takeIf { it },
+            chronometerBase = notification.`when`.takeIf { chronometer && it > 0 },
+            category = notification.category,
+            countDown = extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN, false).takeIf { it },
+            promoted = promoted.takeIf { it }
         )
     }
 

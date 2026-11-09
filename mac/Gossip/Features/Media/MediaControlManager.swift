@@ -7,6 +7,7 @@ enum MediaMessageType {
     /// The synchronised state slot a phone keeps its now-playing state in.
     static let nowPlayingSlot = "media.nowplaying"
     static let command = "media.command"
+    static let volume = "media.volume"
 }
 
 /// Playback commands understood by the phone's `media.command` handler.
@@ -157,16 +158,33 @@ final class MediaControlManager: ObservableObject {
         try? transportManager.send(envelope: envelope)
     }
 
-    /// One volume step of the phone's music stream, `up` or `down`; only the phone acts on it (`media.volume`).
+    /// One volume step of the phone's music stream, `up` or `down` (`media.volume` with a `direction`). A step is not
+    /// idempotent, so it carries a `commandId` the phone acts on once.
     func sendVolume(up: Bool) {
         guard let transportManager, let deviceId = effectiveSelectedDeviceId else { return }
         let envelope = Envelope(
-            type: "media.volume",
+            type: MediaMessageType.volume,
             senderId: identity.deviceId,
             recipientId: deviceId,
             payload: .object(["direction": .string(up ? "up" : "down"), "commandId": .string(UUID().uuidString)])
         )
         try? transportManager.send(envelope: envelope)
+    }
+
+    /// Sets the phone's music volume to an absolute `level` (0-100). Absolute, so repeating it is harmless.
+    func sendVolume(_ level: Int) {
+        guard let transportManager, let deviceId = effectiveSelectedDeviceId else { return }
+        let envelope = Envelope(
+            type: MediaMessageType.volume,
+            senderId: identity.deviceId,
+            recipientId: deviceId,
+            payload: Self.volumePayload(level: level)
+        )
+        try? transportManager.send(envelope: envelope)
+    }
+
+    static func volumePayload(level: Int) -> JSONValue {
+        .object(["level": .number(Double(min(100, max(0, level))))])
     }
 
     func play() { sendCommand(.play) }

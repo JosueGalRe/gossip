@@ -1,3 +1,6 @@
+> [!NOTE]
+> This is a fork of [vmd1/gossip](https://github.com/vmd1/gossip). It merges every upstream release and adds a [Droppy](https://getdroppy.app) integration, richer notifications and a few more changes, listed in [What this fork adds](#what-this-fork-adds). Everything after that section is upstream's README: its download links install upstream's Gossip, not this fork.
+
 <div align="center">
 
 <img src="site/icon.png" alt="Gossip" width="96" height="96">
@@ -22,6 +25,42 @@ Direct on your local network, optionally relayed (end-to-end encrypted) when you
 </div>
 
 ---
+
+## What this fork adds
+
+- **Your phone in the notch.** A local bridge feeds the [Gossip droplet](https://github.com/JosueGalRe/gossip-droplet) for [Droppy](https://getdroppy.app): the phone's notifications (reply, dismiss, or use the app's own buttons), battery, media, SMS, clipboard arrivals, its apps as Mac windows, its Do Not Disturb and hotspot, and Ring. The bridge is a Unix socket that only accepts processes signed by Droppy's team. While Droppy is connected, the Mac doesn't show the same notification twice.
+- **Richer notifications.** Sender photos, pictures, the app's own action buttons, suggested replies and live ongoing notifications such as progress, timers and calls, plus the phone's volume from the Mac.
+- **Tailscale, set up by itself.** Each device publishes its tailnet address, and when no fallback address was typed in, Gossip dials a paired device's. Only Tailscale's range (`100.64.0.0/10`) is used, so a peer can't point the Mac's dials anywhere else.
+- **A new Android home.** The paired device up front (how it's reached, its battery, Ring, Trackpad and Clipboard), every feature as a tile, a sheet with what needs fixing, an accent picker with Material You, and permissions as a checklist with Shizuku.
+- **Pause and resume on Android** from the app, the status notification, a Quick Settings tile or a home screen widget. The status notification says what Gossip is doing and has a quiet mode.
+- **Smaller changes.** `connect://pair` opens the Mac's pairing window, the login item registers from `/Applications`, and Android group summary notifications aren't mirrored.
+- **Hardening.**
+  - Multi-device trust is off: a trusted device can't add devices this one never paired with, so pair each device directly.
+  - Cleaning up stale scrcpy servers only kills Gossip's own sessions.
+  - Phone apps opened as Mac windows show the phone's remote-access indicator, like mirroring does.
+  - With a team ID (a free Apple Development certificate is enough), the Mac keeps its secrets in the login Keychain instead of files.
+
+### Getting the fork
+
+There are no release builds of the fork yet, so build it from source. The prerequisites and details are in [Building and signing](docs/building-and-signing.md).
+
+```bash
+cd mac
+scripts/use-apple-development-signing.sh   # after adding a free Apple Development certificate in Xcode
+scripts/build-core.sh
+xcodegen generate
+xcodebuild -project Gossip.xcodeproj -scheme Gossip -configuration Release -destination 'platform=macOS' build
+```
+
+```bash
+cd android
+./gradlew assembleDebug                    # app/build/outputs/apk/debug/app-debug.apk
+```
+
+- Move `Gossip.app` to `/Applications`: the login item registers from there.
+- The fork keeps upstream's bundle and package IDs, so it replaces upstream's Gossip instead of sitting next to it. On Android, uninstall upstream's app first (it is signed with a different key) and pair again.
+- Run the fork on the Mac and on the phone. Mixing it with upstream builds isn't tested.
+- For the notch, install [Droppy](https://getdroppy.app) and then [the droplet](https://github.com/JosueGalRe/gossip-droplet#install).
 
 ## Features
 
